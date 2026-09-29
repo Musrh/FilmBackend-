@@ -8,306 +8,371 @@ import { fileURLToPath } from "url";
 
 const app = express();
 
+// ==================================================
+// CONFIGURATION
+// ==================================================
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ==========================
-// CONFIGURATION
-// ==========================
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
 app.use(
-  express.json({
-    limit: "10mb",
-  })
+  express.json({
+    limit: "10mb",
+  })
 );
 
-// ==========================
-// DOSSIER DES ASSETS
-// ==========================
+// ==================================================
+// DOSSIER UPLOADS
+// ==================================================
 
 const uploadsDir = path.join(__dirname, "uploads");
 
 if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, {
-    recursive: true,
-  });
+  fs.mkdirSync(uploadsDir, {
+    recursive: true,
+  });
 }
 
-// ==========================
+// ==================================================
 // MULTER
-// ==========================
+// ==================================================
 
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadsDir);
-  },
+  destination: (req, file, cb) => {
+    cb(null, uploadsDir);
+  },
 
-  filename: (req, file, cb) => {
-    const safeName = file.originalname.replace(
-      /[^a-zA-Z0-9._-]/g,
-      "_"
-    );
+  filename: (req, file, cb) => {
+    const originalName = file.originalname || "image";
 
-    const uniqueName = `${Date.now()}-${safeName}`;
+    const safeName = originalName.replace(
+      /[^a-zA-Z0-9._-]/g,
+      "_"
+    );
 
-    cb(null, uniqueName);
-  },
+    const uniqueName =
+      `${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}-${safeName}`;
+
+    cb(null, uniqueName);
+  },
 });
 
 const upload = multer({
-  storage,
+  storage,
 
-  limits: {
-    fileSize: 20 * 1024 * 1024,
-  },
-
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith("image/")) {
-      cb(null, true);
-    } else {
-      cb(new Error("Seules les images sont acceptées."));
-    }
-  },
+  limits: {
+    fileSize: 20 * 1024 * 1024,
+  },
 });
 
-// ==========================
+// ==================================================
 // FICHIERS STATIQUES
-// ==========================
+// ==================================================
 
 app.use(
-  "/uploads",
-  express.static(uploadsDir)
+  "/uploads",
+  express.static(uploadsDir)
 );
 
-// ==========================
-// ROUTE PRINCIPALE
-// ==========================
+// ==================================================
+// TEST RACINE
+// ==================================================
 
 app.get("/", (req, res) => {
-  res.json({
-    success: true,
-    message: "Cinema AI backend fonctionne.",
-  });
+  res.json({
+    success: true,
+    message: "Cinema AI backend fonctionne.",
+  });
 });
 
-// ==========================
-// TEST BACKEND
-// ==========================
+// ==================================================
+// HEALTH CHECK
+// ==================================================
 
 app.get("/api/health", (req, res) => {
-  res.json({
-    success: true,
-    message: "Backend Cinema AI opérationnel.",
-  });
+  res.json({
+    success: true,
+    message: "Backend Cinema AI opérationnel.",
+  });
 });
 
-// ==========================
-// UPLOAD D'UNE OU PLUSIEURS IMAGES
-// ==========================
+// ==================================================
+// TEST UPLOAD IMAGE
+// ==================================================
 
 app.post(
-  "/api/assets",
-  upload.array("images", 20),
-  (req, res) => {
-    try {
-      const files = req.files || [];
+  "/api/assets",
+  upload.single("image"),
+  (req, res) => {
+    try {
+      console.log(
+        "================================="
+      );
 
-      const assets = files.map((file) => {
-        const publicUrl =
-          `${req.protocol}://${req.get("host")}` +
-          `/uploads/${encodeURIComponent(file.filename)}`;
+      console.log(
+        "TEST UPLOAD IMAGE"
+      );
 
-        return {
-          id: `${Date.now()}-${Math.random()
-            .toString(36)
-            .slice(2, 10)}`,
+      console.log(
+        "Headers Content-Type :",
+        req.headers["content-type"]
+      );
 
-          name: file.originalname,
+      console.log(
+        "Fichier reçu :",
+        req.file
+          ? {
+              fieldname: req.file.fieldname,
+              originalname: req.file.originalname,
+              mimetype: req.file.mimetype,
+              size: req.file.size,
+              filename: req.file.filename,
+            }
+          : null
+      );
 
-          filename: file.filename,
+      console.log(
+        "================================="
+      );
 
-          mimetype: file.mimetype,
+      // Aucun fichier reçu
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
 
-          size: file.size,
+          message:
+            "Aucun fichier image reçu.",
 
-          url: publicUrl,
-        };
-      });
+          debug: {
+            contentType:
+              req.headers["content-type"] || null,
+          },
+        });
+      }
 
-      console.log(
-        `Assets reçus : ${assets.length}`
-      );
+      const fileUrl =
+        `${req.protocol}://${req.get("host")}` +
+        `/uploads/${encodeURIComponent(
+          req.file.filename
+        )}`;
 
-      console.log(assets);
+      const asset = {
+        id: `${Date.now()}-${Math.random()
+          .toString(36)
+          .slice(2, 10)}`,
 
-      res.json({
-        success: true,
+        name: req.file.originalname,
 
-        message:
-          "Images reçues correctement.",
+        filename: req.file.filename,
 
-        assets,
-      });
-    } catch (error) {
-      console.error(
-        "Erreur /api/assets :",
-        error
-      );
+        mimetype: req.file.mimetype,
 
-      res.status(500).json({
-        success: false,
+        size: req.file.size,
 
-        message:
-          "Erreur pendant la réception des images.",
+        url: fileUrl,
+      };
 
-        error: error.message,
-      });
-    }
-  }
+      console.log(
+        "URL image :",
+        fileUrl
+      );
+
+      res.json({
+        success: true,
+
+        message:
+          "Image reçue correctement.",
+
+        asset,
+      });
+    } catch (error) {
+      console.error(
+        "Erreur /api/assets :",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+
+        message:
+          "Erreur pendant la réception de l'image.",
+
+        error: error.message,
+      });
+    }
+  }
 );
 
-// ==========================
+// ==================================================
 // RÉCEPTION DES DONNÉES DE SCÈNE
-// ==========================
+// ==================================================
 
-app.post("/api/generate", (req, res) => {
-  try {
-    const sceneData = req.body;
+app.post(
+  "/api/generate",
+  (req, res) => {
+    try {
+      const sceneData = req.body;
 
-    if (
-      !sceneData ||
-      !sceneData.scene
-    ) {
-      return res.status(400).json({
-        success: false,
+      if (
+        !sceneData ||
+        !sceneData.scene
+      ) {
+        return res.status(400).json({
+          success: false,
 
-        message:
-          "Données de scène manquantes.",
-      });
-    }
+          message:
+            "Données de scène manquantes.",
+        });
+      }
 
-    console.log(
-      "================================="
-    );
+      console.log(
+        "================================="
+      );
 
-    console.log(
-      "NOUVELLE DEMANDE DE GÉNÉRATION"
-    );
+      console.log(
+        "DONNÉES DE SCÈNE REÇUES"
+      );
 
-    console.log(
-      "Scene ID :",
-      sceneData.scene.id
-    );
+      console.log(
+        "Scene ID :",
+        sceneData.scene.id
+      );
 
-    console.log(
-      "Personnages :",
-      sceneData.characters?.length || 0
-    );
+      console.log(
+        "Personnages :",
+        sceneData.characters?.length || 0
+      );
 
-    console.log(
-      "Lieux :",
-      sceneData.locations?.length || 0
-    );
+      console.log(
+        "Lieux :",
+        sceneData.locations?.length || 0
+      );
 
-    console.log(
-      "Mouvements :",
-      sceneData.movements?.length || 0
-    );
+      console.log(
+        "Mouvements :",
+        sceneData.movements?.length || 0
+      );
 
-    console.log(
-      "Images générales :",
-      sceneData.referenceImages?.length || 0
-    );
+      console.log(
+        "Reference images :",
+        sceneData.referenceImages?.length || 0
+      );
 
-    console.log(
-      "================================="
-    );
+      console.log(
+        "================================="
+      );
 
-    res.json({
-      success: true,
+      res.json({
+        success: true,
 
-      message:
-        "Données de scène reçues correctement.",
+        message:
+          "Données de scène reçues correctement.",
 
-      received: {
-        sceneId: sceneData.scene.id,
+        received: {
+          sceneId:
+            sceneData.scene.id,
 
-        characters:
-          sceneData.characters?.length || 0,
+          characters:
+            sceneData.characters?.length || 0,
 
-        locations:
-          sceneData.locations?.length || 0,
+          locations:
+            sceneData.locations?.length || 0,
 
-        movements:
-          sceneData.movements?.length || 0,
+          movements:
+            sceneData.movements?.length || 0,
 
-        referenceImages:
-          sceneData.referenceImages?.length || 0,
-      },
-    });
-  } catch (error) {
-    console.error(
-      "Erreur /api/generate :",
-      error
-    );
+          referenceImages:
+            sceneData.referenceImages?.length || 0,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "Erreur /api/generate :",
+        error
+      );
 
-    res.status(500).json({
-      success: false,
+      res.status(500).json({
+        success: false,
 
-      message:
-        "Erreur pendant le traitement de la scène.",
+        message:
+          "Erreur pendant le traitement de la scène.",
 
-      error: error.message,
-    });
-  }
-});
+        error: error.message,
+      });
+    }
+  }
+);
 
-// ==========================
-// GESTION DES ERREURS MULTER
-// ==========================
+// ==================================================
+// ERREURS MULTER
+// ==================================================
 
 app.use(
-  (error, req, res, next) => {
-    if (error instanceof multer.MulterError) {
-      return res.status(400).json({
-        success: false,
+  (error, req, res, next) => {
+    console.error(
+      "ERREUR SERVEUR :",
+      error
+    );
 
-        message:
-          "Erreur lors de l'envoi du fichier.",
+    if (
+      error instanceof multer.MulterError
+    ) {
+      return res.status(400).json({
+        success: false,
 
-        error: error.message,
-      });
-    }
+        message:
+          "Erreur Multer lors de l'envoi du fichier.",
 
-    if (error) {
-      return res.status(400).json({
-        success: false,
+        error: error.message,
 
-        message:
-          error.message ||
-          "Erreur serveur.",
-      });
-    }
+        code: error.code,
+      });
+    }
 
-    next();
-  }
+    if (error) {
+      return res.status(400).json({
+        success: false,
+
+        message:
+          "Erreur lors de l'envoi du fichier.",
+
+        error:
+          error.message ||
+          "Erreur inconnue.",
+      });
+    }
+
+    next();
+  }
 );
 
-// ==========================
+// ==================================================
 // DÉMARRAGE
-// ==========================
-
-const PORT =
-  process.env.PORT || 3000;
+// ==================================================
 
 app.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `Cinema AI backend démarré sur le port ${PORT}`
-    );
-  }
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log(
+      `Cinema AI backend démarré sur le port ${PORT}`
+    );
+
+    console.log(
+      `Port utilisé : ${PORT}`
+    );
+  }
 );
+
+
+
+
+
+
+
