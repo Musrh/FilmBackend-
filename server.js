@@ -421,7 +421,9 @@ app.post("/api/generate-video", async (req, res) => {
 
     /* ---------- APPEL WAN 2.2 ---------- */
 
+    console.log("Envoi de l'image au Space...");
     const image = await loadImageInput(imageUrl);
+    console.log("Image prête, soumission du job...");
 
     const job = client.submit("/generate_video", [
       image,
@@ -434,25 +436,42 @@ app.post("/api/generate-video", async (req, res) => {
       seed,
       randomizeSeed,
     ]);
+    console.log("Job soumis, attente des statuts...");
+
+    const startedAt = Date.now();
+    const heartbeat = setInterval(() => {
+      const s = Math.round((Date.now() - startedAt) / 1000);
+      console.log(`... en attente du Space (${s}s)`);
+    }, 15000);
+
+    const timeout = setTimeout(() => {
+      console.error("Timeout 8 min, annulation du job");
+      job.cancel?.();
+    }, 8 * 60 * 1000);
 
     let result = null;
     let lastStatus = null;
 
-    for await (const msg of job) {
-      if (msg.type === "status") {
-        lastStatus = msg;
-        console.log(
-          "STATUS",
-          msg.stage,
-          msg.queue_position ?? "",
-          msg.message ?? "",
-          msg.code ?? ""
-        );
-      }
+    try {
+      for await (const msg of job) {
+        if (msg.type === "status") {
+          lastStatus = msg;
+          console.log(
+            "STATUS",
+            msg.stage,
+            msg.queue_position ?? "",
+            msg.message ?? "",
+            msg.code ?? ""
+          );
+        }
 
-      if (msg.type === "data") {
-        result = msg;
+        if (msg.type === "data") {
+          result = msg;
+        }
       }
+    } finally {
+      clearInterval(heartbeat);
+      clearTimeout(timeout);
     }
 
     if (!result) {
