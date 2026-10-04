@@ -1,582 +1,1660 @@
+Gmail, c'est encore mieux dans l'appli
+Une messagerie sécurisée, rapide et organisée
+Ouvrir
+Server
+M
+MUSTAPHA HOME
+à moi
+il y a 0 minuteDétails
 import express from "express";
 import cors from "cors";
 import multer from "multer";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { Client, handle_file } from "@gradio/client";
+import { Client } from "@gradio/client";
 
 const app = express();
-
-// Railway est derrière un proxy : req.protocol renverra https
-app.set("trust proxy", 1);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = process.env.PORT || 3000;
 
-const HF_TOKEN = process.env.HF_TOKEN;
-const HF_SPACE = "zerogpu-aoti/wan2-2-fp8da-aoti-faster";
-const DEBUG_API = Boolean(process.env.DEBUG_API);
+// ============================================================
+// HUGGING FACE / WAN 2.2
+// ============================================================
 
-// Une seule génération à la fois (évite d'épuiser le quota ZeroGPU)
-let generating = false;
+const HF_TOKEN = process.env.HF_TOKEN || "";
+
+const HF_SPACE =
+  "zerogpu-aoti/wan2-2-fp8da-aoti-faster";
+
+const WAN_ENABLED = Boolean(HF_TOKEN);
+
+// Timeout maximum d'une génération.
+// 8 minutes = 480 secondes.
+const WAN_TIMEOUT_MS = 8 * 60 * 1000;
+
+// Fréquence d'affichage du statut.
+const WAN_STATUS_INTERVAL_MS = 5000;
+
+// ============================================================
+// EXPRESS
+// ============================================================
 
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
 
-/* =========================================================
-   DOSSIER UPLOADS
-========================================================= */
+app.use(
+  express.json({
+    limit: "10mb",
+  })
+);
 
-const uploadsDir = path.join(__dirname, "uploads");
+// ============================================================
+// DOSSIER UPLOADS
+// ============================================================
+
+const uploadsDir = path.join(
+  __dirname,
+  "uploads"
+);
 
 if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
+  fs.mkdirSync(uploadsDir, {
+    recursive: true,
+  });
 }
 
-app.use("/uploads", express.static(uploadsDir));
-
-/* =========================================================
-   MULTER
-========================================================= */
+// ============================================================
+// MULTER
+// ============================================================
 
 const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadsDir),
+  destination: (_req, _file, cb) => {
+    cb(null, uploadsDir);
+  },
+
   filename: (_req, file, cb) => {
-    const safeName = (file.originalname || "image.jpg").replace(
+    const safeName = (
+      file.originalname || "image.jpg"
+    ).replace(
       /[^a-zA-Z0-9._-]/g,
       "_"
     );
+
     cb(
       null,
-      `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeName}`
+      `${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}-${safeName}`
     );
   },
 });
 
 const upload = multer({
   storage,
-  limits: { fileSize: 20 * 1024 * 1024 },
+
+  limits: {
+    fileSize: 20 * 1024 * 1024,
+  },
 });
 
-/* =========================================================
-   ROUTES DE BASE
-========================================================= */
+// Les fichiers deviennent accessibles par /uploads/...
+app.use(
+  "/uploads",
+  express.static(uploadsDir)
+);
 
-app.get("/", (_req, res) => {
-  res.json({ success: true, message: "Cinema AI backend fonctionne." });
-});
+// ============================================================
+// HELPERS GENERAUX
+// ============================================================
 
-app.get("/api/health", (_req, res) => {
-  res.json({
-    success: true,
-    message: "Backend Cinema AI opérationnel.",
-    wan22: {
-      configured: Boolean(HF_TOKEN),
-      space: HF_SPACE,
-    },
-  });
-});
-
-/* =========================================================
-   UPLOAD IMAGE
-========================================================= */
-
-app.post("/api/assets", upload.single("image"), (req, res) => {
-  try {
-    console.log("=== UPLOAD IMAGE ===");
-    console.log(
-      "File:",
-      req.file
-        ? {
-            originalname: req.file.originalname,
-            mimetype: req.file.mimetype,
-            size: req.file.size,
-            filename: req.file.filename,
-          }
-        : null
-    );
-
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: "Aucun fichier image reçu.",
-      });
-    }
-
-    const baseUrl =
-      process.env.PUBLIC_BACKEND_URL ||
-      `${req.protocol}://${req.get("host")}`;
-
-    const url = `${baseUrl}/uploads/${encodeURIComponent(req.file.filename)}`;
-
-    const asset = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-      name: req.file.originalname,
-      filename: req.file.filename,
-      mimetype: req.file.mimetype,
-      size: req.file.size,
-      url,
-    };
-
-    res.json({
-      success: true,
-      message: "Image reçue correctement.",
-      asset,
-    });
-  } catch (error) {
-    console.error("Erreur /api/assets:", error);
-    res.status(500).json({
-      success: false,
-      message: "Erreur pendant la réception de l'image.",
-      error: error.message,
-    });
-  }
-});
-
-/* =========================================================
-   RÉCEPTION DES DONNÉES DE SCÈNE
-========================================================= */
-
-app.post("/api/generate", (req, res) => {
-  try {
-    const sceneData = req.body;
-
-    if (!sceneData || !sceneData.scene) {
-      return res.status(400).json({
-        success: false,
-        message: "Données de scène manquantes.",
-      });
-    }
-
-    console.log("=== DONNÉES DE SCÈNE REÇUES ===");
-    console.log("Scene ID:", sceneData.scene.id);
-    console.log("Personnages:", sceneData.characters?.length || 0);
-    console.log("Lieux:", sceneData.locations?.length || 0);
-    console.log("Mouvements:", sceneData.movements?.length || 0);
-    console.log("Reference images:", sceneData.referenceImages?.length || 0);
-    console.log("================================");
-
-    res.json({
-      success: true,
-      message: "Données de scène reçues correctement.",
-      received: {
-        sceneId: sceneData.scene.id,
-        characters: sceneData.characters?.length || 0,
-        locations: sceneData.locations?.length || 0,
-        movements: sceneData.movements?.length || 0,
-        referenceImages: sceneData.referenceImages?.length || 0,
-      },
-    });
-  } catch (error) {
-    console.error("Erreur /api/generate:", error);
-    res.status(500).json({
-      success: false,
-      message: "Erreur pendant le traitement de la scène.",
-      error: error.message,
-    });
-  }
-});
-
-/* =========================================================
-   UTILITAIRE : TROUVER UNE IMAGE
-========================================================= */
-
-function firstImageUrl(images) {
-  if (!Array.isArray(images) || images.length === 0) return null;
-  const image = images[0];
-  return image?.storageUrl || image?.url || null;
+function sleep(ms) {
+  return new Promise((resolve) =>
+    setTimeout(resolve, ms)
+  );
 }
 
-function findFirstImage(sceneData) {
-  // 1. Image de référence de scène
-  const sceneImage = firstImageUrl(sceneData.referenceImages);
-  if (sceneImage) return sceneImage;
+function safeNumber(value, fallback) {
+  const number = Number(value);
 
-  // 2. Image du premier personnage qui en a une
-  for (const character of sceneData.characters || []) {
-    const url = firstImageUrl(character.imageReferences);
-    if (url) return url;
+  return Number.isFinite(number)
+    ? number
+    : fallback;
+}
+
+function clamp(value, min, max) {
+  return Math.min(
+    max,
+    Math.max(min, value)
+  );
+}
+
+function formatEta(eta) {
+  if (
+    eta === null ||
+    eta === undefined
+  ) {
+    return "inconnue";
   }
 
-  // 3. Image du premier lieu qui en a une
-  for (const location of sceneData.locations || []) {
-    const url = firstImageUrl(location.imageReferences);
-    if (url) return url;
+  const number = Number(eta);
+
+  if (!Number.isFinite(number)) {
+    return String(eta);
+  }
+
+  if (number < 60) {
+    return `${Math.round(number)}s`;
+  }
+
+  return `${Math.round(
+    number / 60
+  )}min`;
+}
+
+// ============================================================
+// EXTRACTION RESULTAT VIDEO
+// ============================================================
+
+function extractVideoValue(data) {
+  if (!data) {
+    return null;
+  }
+
+  // Tableau de résultats
+  if (Array.isArray(data)) {
+    if (data.length === 0) {
+      return null;
+    }
+
+    return extractVideoValue(
+      data[0]
+    );
+  }
+
+  // URL directe
+  if (typeof data === "string") {
+    return {
+      url: data,
+    };
+  }
+
+  // Objet Gradio
+  if (
+    typeof data === "object"
+  ) {
+    if (data.url) {
+      return {
+        ...data,
+        url: data.url,
+      };
+    }
+
+    if (data.path) {
+      return {
+        ...data,
+        url: data.path,
+      };
+    }
+
+    if (data.video) {
+      return extractVideoValue(
+        data.video
+      );
+    }
+
+    if (data.data) {
+      return extractVideoValue(
+        data.data
+      );
+    }
   }
 
   return null;
 }
 
-/* =========================================================
-   PROMPT CINÉMATIQUE
-========================================================= */
+// ============================================================
+// RECHERCHE PREMIERE IMAGE
+// ============================================================
+
+function findFirstImage(sceneData) {
+  // ----------------------------------------------------------
+  // PERSONNAGES
+  // ----------------------------------------------------------
+
+  const characters =
+    Array.isArray(
+      sceneData?.characters
+    )
+      ? sceneData.characters
+      : [];
+
+  for (
+    const character of characters
+  ) {
+    const refs =
+      Array.isArray(
+        character?.imageReferences
+      )
+        ? character.imageReferences
+        : [];
+
+    for (
+      const image of refs
+    ) {
+      if (
+        image?.url &&
+        !String(
+          image.url
+        ).startsWith("blob:")
+      ) {
+        return image.url;
+      }
+
+      if (
+        image?.storageUrl &&
+        !String(
+          image.storageUrl
+        ).startsWith("blob:")
+      ) {
+        return image.storageUrl;
+      }
+    }
+  }
+
+  // ----------------------------------------------------------
+  // LIEUX
+  // ----------------------------------------------------------
+
+  const locations =
+    Array.isArray(
+      sceneData?.locations
+    )
+      ? sceneData.locations
+      : [];
+
+  for (
+    const location of locations
+  ) {
+    const refs =
+      Array.isArray(
+        location?.imageReferences
+      )
+        ? location.imageReferences
+        : [];
+
+    for (
+      const image of refs
+    ) {
+      if (
+        image?.url &&
+        !String(
+          image.url
+        ).startsWith("blob:")
+      ) {
+        return image.url;
+      }
+
+      if (
+        image?.storageUrl &&
+        !String(
+          image.storageUrl
+        ).startsWith("blob:")
+      ) {
+        return image.storageUrl;
+      }
+    }
+  }
+
+  // ----------------------------------------------------------
+  // REFERENCES SCENE
+  // ----------------------------------------------------------
+
+  const referenceImages =
+    Array.isArray(
+      sceneData?.referenceImages
+    )
+      ? sceneData.referenceImages
+      : [];
+
+  for (
+    const image of referenceImages
+  ) {
+    if (
+      image?.url &&
+      !String(
+        image.url
+      ).startsWith("blob:")
+    ) {
+      return image.url;
+    }
+
+    if (
+      image?.storageUrl &&
+      !String(
+        image.storageUrl
+      ).startsWith("blob:")
+    ) {
+      return image.storageUrl;
+    }
+  }
+
+  // ----------------------------------------------------------
+  // STYLE VISUEL
+  // ----------------------------------------------------------
+
+  const visualImages =
+    Array.isArray(
+      sceneData?.visualStyle
+        ?.images
+    )
+      ? sceneData.visualStyle.images
+      : [];
+
+  for (
+    const image of visualImages
+  ) {
+    if (
+      image?.url &&
+      !String(
+        image.url
+      ).startsWith("blob:")
+    ) {
+      return image.url;
+    }
+
+    if (
+      image?.storageUrl &&
+      !String(
+        image.storageUrl
+      ).startsWith("blob:")
+    ) {
+      return image.storageUrl;
+    }
+  }
+
+  return null;
+}
+
+// ============================================================
+// CONSTRUCTION DU PROMPT
+// ============================================================
 
 function buildVideoPrompt(sceneData) {
-  const scene = sceneData.scene || {};
-  const parts = [];
+  const scene =
+    sceneData?.scene || {};
 
-  if (scene.title) parts.push(`Scene: ${scene.title}.`);
-  if (scene.description) parts.push(scene.description);
-  if (sceneData.action) parts.push(`Action: ${sceneData.action}`);
+  // ----------------------------------------------------------
+  // PERSONNAGES
+  // ----------------------------------------------------------
 
-  if (Array.isArray(sceneData.characters)) {
-    const names = sceneData.characters.map((c) => c.name).filter(Boolean);
-    if (names.length > 0) {
-      parts.push(`Characters present: ${names.join(", ")}.`);
-    }
+  const characters =
+    Array.isArray(
+      sceneData?.characters
+    )
+      ? sceneData.characters
+          .map(
+            (character) =>
+              character?.name
+          )
+          .filter(Boolean)
+      : [];
+
+  // ----------------------------------------------------------
+  // LIEUX
+  // ----------------------------------------------------------
+
+  const locations =
+    Array.isArray(
+      sceneData?.locations
+    )
+      ? sceneData.locations
+          .map(
+            (location) =>
+              location?.name
+          )
+          .filter(Boolean)
+      : [];
+
+  // ----------------------------------------------------------
+  // MOUVEMENTS
+  // ----------------------------------------------------------
+
+  const movements =
+    Array.isArray(
+      sceneData?.movements
+    )
+      ? sceneData.movements
+          .map(
+            (movement) => {
+              const text =
+                movement?.text ||
+                movement?.description ||
+                "";
+
+              const destination =
+                movement?.destination ||
+                "";
+
+              if (
+                text &&
+                destination
+              ) {
+                return `${text} vers ${destination}`;
+              }
+
+              return (
+                text ||
+                destination
+              );
+            }
+          )
+          .filter(Boolean)
+      : [];
+
+  // ----------------------------------------------------------
+  // STYLE
+  // ----------------------------------------------------------
+
+  let visualStyle = "";
+
+  if (
+    typeof sceneData?.visualStyle ===
+    "object"
+  ) {
+    visualStyle =
+      sceneData
+        ?.visualStyle
+        ?.text || "";
+  } else {
+    visualStyle =
+      sceneData?.visualStyle ||
+      "";
   }
 
-  if (Array.isArray(sceneData.locations)) {
-    const locations = sceneData.locations.map((l) => l.name).filter(Boolean);
-    if (locations.length > 0) {
-      parts.push(`Location: ${locations.join(", ")}.`);
-    }
-  }
+  // ----------------------------------------------------------
+  // PROMPT FINAL
+  // ----------------------------------------------------------
 
-  if (Array.isArray(sceneData.movements)) {
-    const movements = sceneData.movements
-      .map((movement) => {
-        const text = movement.text || movement.name || "";
-        const destination = movement.destination || "";
-        return text && destination ? `${text} toward ${destination}` : text;
-      })
-      .filter(Boolean);
+  const parts = [
+    "Cinematic realistic live-action video.",
 
-    if (movements.length > 0) {
-      parts.push(`Movement: ${movements.join(". ")}.`);
-    }
-  }
+    scene.title
+      ? `Scene: ${scene.title}.`
+      : "",
 
-  if (sceneData.dialogue) parts.push(`Dialogue: ${sceneData.dialogue}`);
+    scene.description
+      ? `Description: ${scene.description}.`
+      : "",
 
-  // visualStyle peut être un objet { text } ou une simple chaîne
-  const styleText =
-    typeof sceneData.visualStyle === "string"
-      ? sceneData.visualStyle
-      : sceneData.visualStyle?.text;
+    characters.length
+      ? `Characters: ${characters.join(
+          ", "
+        )}.`
+      : "",
 
-  if (styleText) parts.push(`Visual style: ${styleText}`);
+    locations.length
+      ? `Locations: ${locations.join(
+          ", "
+        )}.`
+      : "",
 
-  parts.push(
-    "Cinematic realistic video, natural human movement, realistic facial expressions, subtle camera movement, realistic lighting, coherent environment."
-  );
+    movements.length
+      ? `Movements: ${movements.join(
+          "; "
+        )}.`
+      : "",
 
-  return parts.join(" ");
+    sceneData?.action
+      ? `Action and staging: ${sceneData.action}.`
+      : "",
+
+    sceneData?.dialogue
+      ? `Dialogue: ${sceneData.dialogue}.`
+      : "",
+
+    visualStyle
+      ? `Visual style: ${visualStyle}.`
+      : "",
+
+    "Natural human motion, coherent anatomy, realistic facial expression, subtle cinematic camera movement, cinematic lighting, high detail.",
+  ];
+
+  return parts
+    .filter(Boolean)
+    .join(" ");
 }
 
-/* =========================================================
-   IMAGE -> ENTRÉE GRADIO
-========================================================= */
+// ============================================================
+// LECTURE IMAGE
+// ============================================================
 
-function normalizeImageUrl(imageUrl) {
-  if (!imageUrl) return null;
-
-  if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")) {
-    return imageUrl;
+async function readLocalImageFromUrl(
+  imageUrl
+) {
+  if (!imageUrl) {
+    throw new Error(
+      "URL de l'image manquante."
+    );
   }
 
-  if (imageUrl.startsWith("/uploads/")) {
-    return `${process.env.PUBLIC_BACKEND_URL || ""}${imageUrl}`;
+  // Une URL blob ne doit jamais arriver ici.
+  if (
+    imageUrl.startsWith("blob:")
+  ) {
+    throw new Error(
+      "Une URL blob: ne peut pas être envoyée au backend."
+    );
   }
 
-  return imageUrl;
-}
+  // ----------------------------------------------------------
+  // IMAGE LOCALE /uploads
+  // ----------------------------------------------------------
 
-// Si l'image est dans /uploads, on la lit sur le disque et on l'envoie
-// directement au Space (plus fiable que de lui faire télécharger une URL).
-async function loadImageInput(imageUrl) {
   try {
-    const pathname = new URL(imageUrl, "http://localhost").pathname;
+    const parsed =
+      new URL(imageUrl);
 
-    if (pathname.startsWith("/uploads/")) {
-      const file = path.join(
-        uploadsDir,
-        path.basename(decodeURIComponent(pathname))
+    const pathname =
+      decodeURIComponent(
+        parsed.pathname
       );
 
-      if (fs.existsSync(file)) {
-        const buffer = await fs.promises.readFile(file);
-        const type = file.toLowerCase().endsWith(".png")
-          ? "image/png"
-          : "image/jpeg";
+    if (
+      pathname.startsWith(
+        "/uploads/"
+      )
+    ) {
+      const filename =
+        path.basename(
+          pathname
+        );
 
-        console.log("Image lue depuis le disque:", file);
-        return handle_file(new Blob([buffer], { type }));
+      const localPath =
+        path.join(
+          uploadsDir,
+          filename
+        );
+
+      if (
+        fs.existsSync(
+          localPath
+        )
+      ) {
+        console.log(
+          "Image lue depuis le disque:",
+          localPath
+        );
+
+        return fs.readFileSync(
+          localPath
+        );
       }
     }
   } catch (error) {
-    console.warn("Lecture locale impossible, repli sur l'URL:", error.message);
+    console.log(
+      "Lecture locale impossible, fallback réseau:",
+      error.message
+    );
   }
 
-  return handle_file(imageUrl);
-}
+  // ----------------------------------------------------------
+  // IMAGE EXTERNE
+  // ----------------------------------------------------------
 
-function toNumber(value, fallback) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
+  console.log(
+    "Téléchargement de l'image distante..."
+  );
 
-/* =========================================================
-   GÉNÉRATION VIDÉO WAN 2.2
-========================================================= */
+  const response =
+    await fetch(imageUrl);
 
-app.post("/api/generate-video", async (req, res) => {
-  if (generating) {
-    return res.status(429).json({
-      success: false,
-      message: "Une génération est déjà en cours. Réessaie dans un instant.",
-    });
+  if (!response.ok) {
+    throw new Error(
+      `Impossible de télécharger l'image (${response.status} ${response.statusText}).`
+    );
   }
 
-  generating = true;
+  const arrayBuffer =
+    await response.arrayBuffer();
 
-  try {
-    console.log("======================================");
-    console.log(" DEMANDE VIDEO WAN 2.2");
-    console.log("======================================");
+  return Buffer.from(
+    arrayBuffer
+  );
+}
 
-    if (!HF_TOKEN) {
-      return res.status(500).json({
-        success: false,
-        message: "HF_TOKEN n'est pas configuré dans Railway.",
-      });
-    }
+// ============================================================
+// ATTENDRE WAN 2.2
+// ============================================================
 
-    const sceneData = req.body;
+async function waitForWanJob(
+  job
+) {
+  return new Promise(
+    (resolve, reject) => {
+      let finished = false;
 
-    if (!sceneData) {
-      return res.status(400).json({
-        success: false,
-        message: "Aucune donnée reçue.",
-      });
-    }
+      let lastStatus = null;
+      let lastData = null;
 
-    /* ---------- IMAGE ---------- */
+      let statusTimer = null;
+      let timeoutTimer = null;
 
-    const imageUrl = normalizeImageUrl(
-      sceneData.imageUrl || findFirstImage(sceneData)
-    );
+      const startedAt =
+        Date.now();
 
-    if (!imageUrl) {
-      return res.status(400).json({
-        success: false,
-        message: "Aucune image de départ trouvée pour la génération vidéo.",
-      });
-    }
+      // ------------------------------------------------------
+      // NETTOYAGE
+      // ------------------------------------------------------
 
-    /* ---------- PROMPT ---------- */
+      const cleanup = () => {
+        if (statusTimer) {
+          clearInterval(
+            statusTimer
+          );
 
-    const prompt = sceneData.prompt || buildVideoPrompt(sceneData);
+          statusTimer = null;
+        }
 
-    /* ---------- PARAMÈTRES ---------- */
+        if (timeoutTimer) {
+          clearTimeout(
+            timeoutTimer
+          );
 
-    // Wan 2.2 Fast est destiné aux clips courts
-    const duration = Math.min(
-      Math.max(
-        toNumber(sceneData.duration ?? sceneData.scene?.duration, 5),
-        1
-      ),
-      5
-    );
+          timeoutTimer = null;
+        }
+      };
 
-    const steps = Math.min(
-      Math.max(Math.round(toNumber(sceneData.steps, 6)), 1),
-      20
-    );
+      // ------------------------------------------------------
+      // FIN
+      // ------------------------------------------------------
 
-    const guidanceScale = toNumber(sceneData.guidanceScale, 1);
-    const guidanceScale2 = toNumber(sceneData.guidanceScale2, 1);
-    const seed = toNumber(sceneData.seed, 42);
-    const randomizeSeed = sceneData.randomizeSeed !== false;
+      const finishSuccess = (
+        value
+      ) => {
+        if (finished) {
+          return;
+        }
 
-    const negativePrompt =
-      sceneData.negativePrompt ||
-      "blurry, distorted, low quality, deformed, unrealistic movement, extra limbs, duplicated person";
+        finished = true;
 
-    console.log("Image:", imageUrl);
-    console.log("Prompt:", prompt);
-    console.log("Duration:", duration);
-    console.log("Steps:", steps);
+        cleanup();
 
-    /* ---------- CONNEXION GRADIO ---------- */
+        resolve({
+          video: value,
+          status: lastStatus,
+        });
+      };
 
-    console.log("Connexion à Hugging Face Space:", HF_SPACE);
+      // ------------------------------------------------------
+      // ERREUR
+      // ------------------------------------------------------
 
-    // Selon la version de @gradio/client, l'option s'appelle hf_token ou token
-    const client = await Client.connect(HF_SPACE, {
-      hf_token: HF_TOKEN,
-      token: HF_TOKEN,
-    });
+      const finishError = (
+        error
+      ) => {
+        if (finished) {
+          return;
+        }
 
-    console.log("Connexion Hugging Face réussie.");
+        finished = true;
 
-    if (DEBUG_API) {
-      console.log("=== view_api ===");
-      console.log(JSON.stringify(await client.view_api(), null, 2));
-      console.log("================");
-    }
+        cleanup();
 
-    /* ---------- APPEL WAN 2.2 ---------- */
+        reject(error);
+      };
 
-    console.log("Envoi de l'image au Space...");
-    const image = await loadImageInput(imageUrl);
-    console.log("Image prête, soumission du job...");
+      // ------------------------------------------------------
+      // AFFICHAGE STATUS
+      // ------------------------------------------------------
 
-    const job = client.submit("/generate_video", [
-      image,
-      prompt,
-      steps,
-      negativePrompt,
-      duration,
-      guidanceScale,
-      guidanceScale2,
-      seed,
-      randomizeSeed,
-    ]);
-    console.log("Job soumis, attente des statuts...");
+      const printStatus = (
+        status
+      ) => {
+        if (!status) {
+          return;
+        }
 
-    const startedAt = Date.now();
-    const heartbeat = setInterval(() => {
-      const s = Math.round((Date.now() - startedAt) / 1000);
-      console.log(`... en attente du Space (${s}s)`);
-    }, 15000);
+        lastStatus =
+          status;
 
-    const timeout = setTimeout(() => {
-      console.error("Timeout 8 min, annulation du job");
-      job.cancel?.();
-    }, 8 * 60 * 1000);
+        const state =
+          status.status ||
+          "unknown";
 
-    let result = null;
-    let lastStatus = null;
+        const position =
+          status.position !==
+            undefined &&
+          status.position !==
+            null
+            ? status.position
+            : "?";
 
-    try {
-      for await (const msg of job) {
-        if (msg.type === "status") {
-          lastStatus = msg;
-          console.log(
-            "STATUS",
-            msg.stage,
-            msg.queue_position ?? "",
-            msg.message ?? "",
-            msg.code ?? ""
+        const queueSize =
+          status.queue_size !==
+            undefined &&
+          status.queue_size !==
+            null
+            ? status.queue_size
+            : "?";
+
+        const eta =
+          formatEta(
+            status.eta
+          );
+
+        const elapsed =
+          Math.round(
+            (Date.now() -
+              startedAt) /
+              1000
+          );
+
+        console.log(
+          `[WAN STATUS] ${state} | position=${position} | queue=${queueSize} | ETA=${eta} | elapsed=${elapsed}s`
+        );
+
+        // Erreur remontée par Gradio.
+        if (
+          state === "error"
+        ) {
+          finishError(
+            new Error(
+              status.code ||
+                "Le Space Wan 2.2 a signalé une erreur."
+            )
           );
         }
 
-        if (msg.type === "data") {
-          result = msg;
+        // Si le statut dit terminé mais qu'aucune
+        // donnée n'est encore disponible, on attend
+        // le message data.
+        if (
+          state ===
+            "complete" &&
+          lastData
+        ) {
+          const video =
+            extractVideoValue(
+              lastData
+            );
+
+          if (video) {
+            finishSuccess(
+              video
+            );
+          }
         }
+      };
+
+      // ------------------------------------------------------
+      // EVENEMENT STATUS
+      // ------------------------------------------------------
+
+      if (
+        typeof job.on ===
+        "function"
+      ) {
+        job.on(
+          "status",
+          (status) => {
+            printStatus(
+              status
+            );
+          }
+        );
+
+        // Données finales.
+        job.on(
+          "data",
+          (data) => {
+            if (finished) {
+              return;
+            }
+
+            lastData = data;
+
+            console.log(
+              "[WAN DATA] Données reçues."
+            );
+
+            const video =
+              extractVideoValue(
+                data
+              );
+
+            if (video) {
+              finishSuccess(
+                video
+              );
+            }
+          }
+        );
+
+        // Erreur client.
+        job.on(
+          "error",
+          (error) => {
+            finishError(
+              error instanceof Error
+                ? error
+                : new Error(
+                    String(error)
+                  )
+            );
+          }
+        );
       }
-    } finally {
-      clearInterval(heartbeat);
-      clearTimeout(timeout);
+
+      // ------------------------------------------------------
+      // POLLING STATUS
+      // ------------------------------------------------------
+      //
+      // La documentation JS expose les événements status.
+      // Certaines versions du client exposent aussi status().
+      // On utilise status() si disponible pour avoir une
+      // surveillance supplémentaire.
+      //
+
+      const pollStatus =
+        async () => {
+          if (finished) {
+            return;
+          }
+
+          try {
+            if (
+              typeof job.status ===
+              "function"
+            ) {
+              const status =
+                await job.status();
+
+              printStatus(
+                status
+              );
+            }
+          } catch (error) {
+            // Ne pas interrompre automatiquement
+            // le job uniquement parce qu'un polling
+            // de statut échoue.
+            console.log(
+              "[WAN STATUS] Polling indisponible:",
+              error.message
+            );
+          }
+        };
+
+      statusTimer =
+        setInterval(
+          pollStatus,
+          WAN_STATUS_INTERVAL_MS
+        );
+
+      // Premier statut immédiatement.
+      pollStatus();
+
+      // ------------------------------------------------------
+      // TIMEOUT REEL
+      // ------------------------------------------------------
+
+      timeoutTimer =
+        setTimeout(
+          async () => {
+            if (finished) {
+              return;
+            }
+
+            const elapsed =
+              Math.round(
+                (Date.now() -
+                  startedAt) /
+                  1000
+              );
+
+            console.error(
+              `Timeout Wan 2.2 après ${elapsed}s.`
+            );
+
+            console.error(
+              "Dernier statut:",
+              lastStatus
+            );
+
+            // IMPORTANT :
+            // On marque la requête comme terminée
+            // AVANT l'annulation pour empêcher
+            // de nouveaux traitements.
+            finished = true;
+
+            cleanup();
+
+            try {
+              if (
+                typeof job.cancel ===
+                "function"
+              ) {
+                console.log(
+                  "Tentative d'annulation du job Wan 2.2..."
+                );
+
+                await job.cancel();
+
+                console.log(
+                  "Demande d'annulation envoyée."
+                );
+              }
+            } catch (cancelError) {
+              console.error(
+                "Erreur pendant l'annulation:",
+                cancelError?.message ||
+                  cancelError
+              );
+            }
+
+            reject(
+              new Error(
+                `Le Space Wan 2.2 n'a pas terminé après ${Math.round(
+                  WAN_TIMEOUT_MS /
+                    60000
+                )} minutes. Le job a été annulé.`
+              )
+            );
+          },
+          WAN_TIMEOUT_MS
+        );
     }
+  );
+}
 
-    if (!result) {
-      console.error("Aucun résultat. Dernier statut:", lastStatus);
+// ============================================================
+// GENERATION WAN 2.2
+// ============================================================
 
-      return res.status(502).json({
-        success: false,
-        message:
-          lastStatus?.message ||
-          "Le Space n'a renvoyé aucun résultat (quota ZeroGPU ou erreur du Space).",
-        code: lastStatus?.code || null,
-        stage: lastStatus?.stage || null,
-      });
-    }
+async function generateWanVideo({
+  imageUrl,
+  prompt,
+  duration,
+  steps,
+  guidanceScale,
+  guidanceScale2,
+  seed,
+  randomizeSeed,
+}) {
+  if (!WAN_ENABLED) {
+    throw new Error(
+      "HF_TOKEN n'est pas configuré sur Railway. Wan 2.2 est désactivé."
+    );
+  }
 
-    console.log("Réponse Wan 2.2 reçue.");
-    console.log(result);
+  console.log(
+    "======================================"
+  );
 
-    /* ---------- RÉCUPÉRATION DE LA VIDÉO ---------- */
+  console.log(
+    "DEMANDE VIDEO WAN 2.2"
+  );
 
-    const output = result?.data?.[0];
+  console.log(
+    "======================================"
+  );
 
-    if (!output) {
-      return res.status(500).json({
-        success: false,
-        message: "Wan 2.2 n'a pas retourné de vidéo.",
-        result,
-      });
-    }
+  console.log(
+    "Image:",
+    imageUrl
+  );
 
-    // Le composant vidéo peut renvoyer { video: { url } } ou { url } ou une chaîne
-    const videoFile = output.video || output;
+  console.log(
+    "Prompt:",
+    prompt
+  );
 
-    let videoUrl = null;
+  console.log(
+    "Duration:",
+    duration
+  );
 
-    if (typeof videoFile === "string") {
-      videoUrl = videoFile;
-    } else if (videoFile?.url) {
-      videoUrl = videoFile.url;
-    } else if (videoFile?.path) {
-      videoUrl = videoFile.path;
-    }
+  console.log(
+    "Steps:",
+    steps
+  );
 
-    if (!videoUrl) {
-      return res.status(500).json({
-        success: false,
-        message:
-          "La vidéo a été générée mais son URL n'a pas pu être récupérée.",
-        output,
-      });
-    }
+  console.log(
+    "Connexion à Hugging Face Space:",
+    HF_SPACE
+  );
 
-    console.log("Video URL:", videoUrl);
+  // ----------------------------------------------------------
+  // CONNEXION
+  // ----------------------------------------------------------
 
+  const client =
+    await Client.connect(
+      HF_SPACE,
+      {
+        token: HF_TOKEN,
+
+        // Demande explicitement les événements
+        // status et data.
+        events: [
+          "status",
+          "data",
+        ],
+      }
+    );
+
+  console.log(
+    "Connexion Hugging Face réussie."
+  );
+
+  // ----------------------------------------------------------
+  // IMAGE
+  // ----------------------------------------------------------
+
+  const imageBuffer =
+    await readLocalImageFromUrl(
+      imageUrl
+    );
+
+  console.log(
+    "Image prête."
+  );
+
+  console.log(
+    "Soumission du job Wan 2.2..."
+  );
+
+  // ----------------------------------------------------------
+  // SUBMIT
+  // ----------------------------------------------------------
+  //
+  // On utilise submit() et non predict()
+  // afin de récupérer un Job surveillable.
+  //
+
+  const job =
+    client.submit(
+      "/generate_video",
+      [
+        imageBuffer,
+        prompt,
+
+        steps,
+
+        "blurry, low quality, distorted face, deformed body, extra limbs, bad anatomy, text, watermark",
+
+        duration,
+
+        guidanceScale,
+
+        guidanceScale2,
+
+        seed,
+
+        randomizeSeed,
+      ]
+    );
+
+  console.log(
+    "Job Wan 2.2 soumis."
+  );
+
+  console.log(
+    "Surveillance de la file..."
+  );
+
+  // ----------------------------------------------------------
+  // ATTENTE
+  // ----------------------------------------------------------
+
+  const result =
+    await waitForWanJob(
+      job
+    );
+
+  if (!result?.video) {
+    throw new Error(
+      "Wan 2.2 a terminé mais aucune vidéo n'a été retournée."
+    );
+  }
+
+  console.log(
+    "======================================"
+  );
+
+  console.log(
+    "VIDEO WAN 2.2 TERMINÉE"
+  );
+
+  console.log(
+    "Video:",
+    result.video
+  );
+
+  console.log(
+    "======================================"
+  );
+
+  return result;
+}
+
+// ============================================================
+// ROUTE RACINE
+// ============================================================
+
+app.get(
+  "/",
+  (_req, res) => {
     res.json({
       success: true,
-      message: "Vidéo générée avec Wan 2.2.",
-      video: { url: videoUrl },
-      prompt,
-      duration,
-      steps,
-    });
-  } catch (error) {
-    console.error("======================================");
-    console.error("ERREUR GENERATION WAN 2.2");
-    console.dir(error, { depth: 5 });
-    console.error("======================================");
 
-    res.status(500).json({
-      success: false,
-      message: "Erreur pendant la génération vidéo Wan 2.2.",
-      error: error?.message || error?.title || String(error),
+      message:
+        "Cinema AI backend fonctionne.",
+
+      wan2Configured:
+        WAN_ENABLED,
+
+      wan2Space:
+        HF_SPACE,
     });
-  } finally {
-    generating = false;
   }
-});
+);
 
-/* =========================================================
-   ERREUR MULTER / SERVEUR
-========================================================= */
+// ============================================================
+// HEALTH
+// ============================================================
 
-app.use((error, _req, res, _next) => {
-  console.error("ERREUR SERVEUR:", error);
+app.get(
+  "/api/health",
+  (_req, res) => {
+    res.json({
+      success: true,
 
-  if (error instanceof multer.MulterError) {
+      message:
+        "Backend Cinema AI opérationnel.",
+
+      wan2Configured:
+        WAN_ENABLED,
+
+      wan2Space:
+        HF_SPACE,
+    });
+  }
+);
+
+// ============================================================
+// UPLOAD IMAGE
+// ============================================================
+
+app.post(
+  "/api/assets",
+  upload.single("image"),
+  (req, res) => {
+    try {
+      console.log(
+        "=== UPLOAD IMAGE ==="
+      );
+
+      console.log(
+        "File:",
+        req.file
+          ? {
+              originalname:
+                req.file
+                  .originalname,
+
+              mimetype:
+                req.file
+                  .mimetype,
+
+              size:
+                req.file.size,
+
+              filename:
+                req.file
+                  .filename,
+            }
+          : null
+      );
+
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+
+          message:
+            "Aucun fichier image reçu.",
+        });
+      }
+
+      const url =
+        `${req.protocol}://${req.get(
+          "host"
+        )}/uploads/${encodeURIComponent(
+          req.file.filename
+        )}`;
+
+      const asset = {
+        id:
+          `${Date.now()}-${Math.random()
+            .toString(36)
+            .slice(2, 10)}`,
+
+        name:
+          req.file.originalname,
+
+        filename:
+          req.file.filename,
+
+        mimetype:
+          req.file.mimetype,
+
+        size:
+          req.file.size,
+
+        url,
+
+        storageUrl:
+          url,
+
+        uploaded:
+          true,
+      };
+
+      res.json({
+        success: true,
+
+        message:
+          "Image reçue correctement.",
+
+        asset,
+      });
+    } catch (error) {
+      console.error(
+        "Erreur /api/assets:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+
+        message:
+          "Erreur pendant la réception de l'image.",
+
+        error:
+          error.message,
+      });
+    }
+  }
+);
+
+// ============================================================
+// TEST DONNEES SCENE
+// ============================================================
+
+app.post(
+  "/api/generate",
+  (req, res) => {
+    try {
+      const sceneData =
+        req.body;
+
+      if (
+        !sceneData ||
+        !sceneData.scene
+      ) {
+        return res.status(400).json({
+          success: false,
+
+          message:
+            "Données de scène manquantes.",
+        });
+      }
+
+      console.log(
+        "=== DONNÉES DE SCÈNE REÇUES ==="
+      );
+
+      console.log(
+        "Scene ID:",
+        sceneData.scene.id
+      );
+
+      console.log(
+        "Personnages:",
+        sceneData
+          .characters
+          ?.length || 0
+      );
+
+      console.log(
+        "Lieux:",
+        sceneData
+          .locations
+          ?.length || 0
+      );
+
+      console.log(
+        "Mouvements:",
+        sceneData
+          .movements
+          ?.length || 0
+      );
+
+      console.log(
+        "Reference images:",
+        sceneData
+          .referenceImages
+          ?.length || 0
+      );
+
+      console.log(
+        "================================"
+      );
+
+      res.json({
+        success: true,
+
+        message:
+          "Données de scène reçues correctement.",
+
+        received: {
+          sceneId:
+            sceneData.scene.id,
+
+          characters:
+            sceneData
+              .characters
+              ?.length || 0,
+
+          locations:
+            sceneData
+              .locations
+              ?.length || 0,
+
+          movements:
+            sceneData
+              .movements
+              ?.length || 0,
+
+          referenceImages:
+            sceneData
+              .referenceImages
+              ?.length || 0,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "Erreur /api/generate:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+
+        message:
+          "Erreur pendant le traitement de la scène.",
+
+        error:
+          error.message,
+      });
+    }
+  }
+);
+
+// ============================================================
+// GENERATION VIDEO
+// ============================================================
+
+app.post(
+  "/api/generate-video",
+  async (req, res) => {
+    try {
+      const sceneData =
+        req.body;
+
+      if (!sceneData) {
+        return res.status(400).json({
+          success: false,
+
+          message:
+            "Données de génération manquantes.",
+        });
+      }
+
+      // ------------------------------------------------------
+      // IMAGE
+      // ------------------------------------------------------
+
+      const imageUrl =
+        sceneData.imageUrl ||
+        findFirstImage(
+          sceneData
+        );
+
+      if (!imageUrl) {
+        return res.status(400).json({
+          success: false,
+
+          message:
+            "Aucune image de référence disponible pour Wan 2.2.",
+        });
+      }
+
+      if (
+        String(
+          imageUrl
+        ).startsWith("blob:")
+      ) {
+        return res.status(400).json({
+          success: false,
+
+          message:
+            "Une URL blob: a été reçue. L'image doit d'abord être uploadée sur le backend.",
+        });
+      }
+
+      // ------------------------------------------------------
+      // PROMPT
+      // ------------------------------------------------------
+
+      const prompt =
+        sceneData.prompt ||
+        buildVideoPrompt(
+          sceneData
+        );
+
+      // ------------------------------------------------------
+      // PARAMETRES
+      // ------------------------------------------------------
+
+      const duration =
+        clamp(
+          safeNumber(
+            sceneData.duration,
+            5
+          ),
+          1,
+          5
+        );
+
+      const steps =
+        clamp(
+          Math.round(
+            safeNumber(
+              sceneData.steps,
+              6
+            )
+          ),
+          1,
+          20
+        );
+
+      const guidanceScale =
+        safeNumber(
+          sceneData.guidanceScale,
+          1
+        );
+
+      const guidanceScale2 =
+        safeNumber(
+          sceneData.guidanceScale2,
+          1
+        );
+
+      const seed =
+        Math.round(
+          safeNumber(
+            sceneData.seed,
+            42
+          )
+        );
+
+      const randomizeSeed =
+        sceneData.randomizeSeed !==
+        false;
+
+      // ------------------------------------------------------
+      // GENERATION
+      // ------------------------------------------------------
+
+      const result =
+        await generateWanVideo({
+          imageUrl,
+
+          prompt,
+
+          duration,
+
+          steps,
+
+          guidanceScale,
+
+          guidanceScale2,
+
+          seed,
+
+          randomizeSeed,
+        });
+
+      // ------------------------------------------------------
+      // REPONSE
+      // ------------------------------------------------------
+
+      res.json({
+        success: true,
+
+        message:
+          "Vidéo Wan 2.2 générée avec succès.",
+
+        video:
+          result.video,
+
+        status:
+          result.status,
+      });
+    } catch (error) {
+      console.error(
+        "======================================"
+      );
+
+      console.error(
+        "ERREUR GENERATION WAN 2.2"
+      );
+
+      console.error(
+        "======================================"
+      );
+
+      console.error(
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+
+        message:
+          error?.message ||
+          "Erreur pendant la génération vidéo Wan 2.2.",
+
+        error:
+          error?.message ||
+          String(error),
+      });
+    }
+  }
+);
+
+// ============================================================
+// GESTION ERREURS
+// ============================================================
+
+app.use(
+  (
+    error,
+    _req,
+    res,
+    _next
+  ) => {
+    console.error(
+      "ERREUR SERVEUR:",
+      error
+    );
+
+    if (
+      error instanceof
+      multer.MulterError
+    ) {
+      return res.status(400).json({
+        success: false,
+
+        message:
+          "Erreur Multer lors de l'envoi du fichier.",
+
+        error:
+          error.message,
+
+        code:
+          error.code,
+      });
+    }
+
     return res.status(400).json({
       success: false,
-      message: "Erreur Multer lors de l'envoi du fichier.",
-      error: error.message,
-      code: error.code,
+
+      message:
+        error.message ||
+        "Erreur serveur.",
     });
   }
+);
 
-  return res.status(400).json({
-    success: false,
-    message: error.message || "Erreur serveur.",
-  });
-});
+// ============================================================
+// DEMARRAGE
+// ============================================================
 
-/* =========================================================
-   START
-========================================================= */
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log(
+      `Cinema AI backend démarré sur le port ${PORT}`
+    );
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Cinema AI backend démarré sur le port ${PORT}`);
-  console.log(`Wan 2.2 configuré: ${Boolean(HF_TOKEN)}`);
-});
+    console.log(
+      "Wan 2.2 configuré:",
+      WAN_ENABLED
+    );
+
+    console.log(
+      "Wan 2.2 Space:",
+      HF_SPACE
+    );
+
+    console.log(
+      "Wan 2.2 timeout:",
+      `${WAN_TIMEOUT_MS / 60000} minutes`
+    );
+  }
+);
