@@ -1,13 +1,15 @@
-
 import express from "express";
 import cors from "cors";
 import multer from "multer";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { Client } from "@gradio/client";
+import { Client, handle_file } from "@gradio/client";
 
 const app = express();
+
+// Railway est derrière un proxy : req.protocol renverra https
+app.set("trust proxy", 1);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,6 +18,10 @@ const PORT = process.env.PORT || 3000;
 
 const HF_TOKEN = process.env.HF_TOKEN;
 const HF_SPACE = "zerogpu-aoti/wan2-2-fp8da-aoti-faster";
+const DEBUG_API = Boolean(process.env.DEBUG_API);
+
+// Une seule génération à la fois (évite d'épuiser le quota ZeroGPU)
+let generating = false;
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
@@ -37,47 +43,31 @@ app.use("/uploads", express.static(uploadsDir));
 ========================================================= */
 
 const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, uploadsDir);
-  },
-
+  destination: (_req, _file, cb) => cb(null, uploadsDir),
   filename: (_req, file, cb) => {
     const safeName = (file.originalname || "image.jpg").replace(
       /[^a-zA-Z0-9._-]/g,
       "_"
     );
-
     cb(
       null,
-      `${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2, 8)}-${safeName}`
+      `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeName}`
     );
   },
 });
 
 const upload = multer({
   storage,
-
-  limits: {
-    fileSize: 20 * 1024 * 1024,
-  },
+  limits: { fileSize: 20 * 1024 * 1024 },
 });
 
 /* =========================================================
-   ROUTE PRINCIPALE
+   ROUTES DE BASE
 ========================================================= */
 
 app.get("/", (_req, res) => {
-  res.json({
-    success: true,
-    message: "Cinema AI backend fonctionne.",
-  });
+  res.json({ success: true, message: "Cinema AI backend fonctionne." });
 });
-
-/* =========================================================
-   HEALTH
-========================================================= */
 
 app.get("/api/health", (_req, res) => {
   res.json({
@@ -96,15 +86,11 @@ app.get("/api/health", (_req, res) => {
 
 app.post("/api/assets", upload.single("image"), (req, res) => {
   try {
-    console.log("=== TEST UPLOAD IMAGE ===");
-
-    console.log("Content-Type:", req.headers["content-type"]);
-
+    console.log("=== UPLOAD IMAGE ===");
     console.log(
       "File:",
       req.file
         ? {
-            fieldname: req.file.fieldname,
             originalname: req.file.originalname,
             mimetype: req.file.mimetype,
             size: req.file.size,
@@ -113,8 +99,6 @@ app.post("/api/assets", upload.single("image"), (req, res) => {
         : null
     );
 
-    console.log("=========================");
-
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -122,41 +106,31 @@ app.post("/api/assets", upload.single("image"), (req, res) => {
       });
     }
 
-    const url = `${req.protocol}://${req.get("host")}/uploads/${encodeURIComponent(
-      req.file.filename
-    )}`;
+    const baseUrl =
+      process.env.PUBLIC_BACKEND_URL ||
+      `${req.protocol}://${req.get("host")}`;
+
+    const url = `${baseUrl}/uploads/${encodeURIComponent(req.file.filename)}`;
 
     const asset = {
-      id: `${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2, 10)}`,
-
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
       name: req.file.originalname,
-
       filename: req.file.filename,
-
       mimetype: req.file.mimetype,
-
       size: req.file.size,
-
       url,
     };
 
     res.json({
       success: true,
-
       message: "Image reçue correctement.",
-
       asset,
     });
   } catch (error) {
     console.error("Erreur /api/assets:", error);
-
     res.status(500).json({
       success: false,
-
       message: "Erreur pendant la réception de l'image.",
-
       error: error.message,
     });
   }
@@ -178,57 +152,29 @@ app.post("/api/generate", (req, res) => {
     }
 
     console.log("=== DONNÉES DE SCÈNE REÇUES ===");
-
     console.log("Scene ID:", sceneData.scene.id);
-
-    console.log(
-      "Personnages:",
-      sceneData.characters?.length || 0
-    );
-
-    console.log(
-      "Lieux:",
-      sceneData.locations?.length || 0
-    );
-
-    console.log(
-      "Mouvements:",
-      sceneData.movements?.length || 0
-    );
-
-    console.log(
-      "Reference images:",
-      sceneData.referenceImages?.length || 0
-    );
-
+    console.log("Personnages:", sceneData.characters?.length || 0);
+    console.log("Lieux:", sceneData.locations?.length || 0);
+    console.log("Mouvements:", sceneData.movements?.length || 0);
+    console.log("Reference images:", sceneData.referenceImages?.length || 0);
     console.log("================================");
 
     res.json({
       success: true,
-
       message: "Données de scène reçues correctement.",
-
       received: {
         sceneId: sceneData.scene.id,
-
         characters: sceneData.characters?.length || 0,
-
         locations: sceneData.locations?.length || 0,
-
         movements: sceneData.movements?.length || 0,
-
-        referenceImages:
-          sceneData.referenceImages?.length || 0,
+        referenceImages: sceneData.referenceImages?.length || 0,
       },
     });
   } catch (error) {
     console.error("Erreur /api/generate:", error);
-
     res.status(500).json({
       success: false,
-
       message: "Erreur pendant le traitement de la scène.",
-
       error: error.message,
     });
   }
@@ -238,106 +184,55 @@ app.post("/api/generate", (req, res) => {
    UTILITAIRE : TROUVER UNE IMAGE
 ========================================================= */
 
+function firstImageUrl(images) {
+  if (!Array.isArray(images) || images.length === 0) return null;
+  const image = images[0];
+  return image?.storageUrl || image?.url || null;
+}
+
 function findFirstImage(sceneData) {
   // 1. Image de référence de scène
-  if (
-    Array.isArray(sceneData.referenceImages) &&
-    sceneData.referenceImages.length > 0
-  ) {
-    return (
-      sceneData.referenceImages[0]?.storageUrl ||
-      sceneData.referenceImages[0]?.url ||
-      null
-    );
+  const sceneImage = firstImageUrl(sceneData.referenceImages);
+  if (sceneImage) return sceneImage;
+
+  // 2. Image du premier personnage qui en a une
+  for (const character of sceneData.characters || []) {
+    const url = firstImageUrl(character.imageReferences);
+    if (url) return url;
   }
 
-  // 2. Image du premier personnage
-  if (
-    Array.isArray(sceneData.characters) &&
-    sceneData.characters.length > 0
-  ) {
-    for (const character of sceneData.characters) {
-      if (
-        Array.isArray(character.imageReferences) &&
-        character.imageReferences.length > 0
-      ) {
-        const image = character.imageReferences[0];
-
-        return (
-          image?.storageUrl ||
-          image?.url ||
-          null
-        );
-      }
-    }
-  }
-
-  // 3. Image du premier lieu
-  if (
-    Array.isArray(sceneData.locations) &&
-    sceneData.locations.length > 0
-  ) {
-    for (const location of sceneData.locations) {
-      if (
-        Array.isArray(location.imageReferences) &&
-        location.imageReferences.length > 0
-      ) {
-        const image = location.imageReferences[0];
-
-        return (
-          image?.storageUrl ||
-          image?.url ||
-          null
-        );
-      }
-    }
+  // 3. Image du premier lieu qui en a une
+  for (const location of sceneData.locations || []) {
+    const url = firstImageUrl(location.imageReferences);
+    if (url) return url;
   }
 
   return null;
 }
 
 /* =========================================================
-   CRÉER LE PROMPT CINÉMATIQUE
+   PROMPT CINÉMATIQUE
 ========================================================= */
 
 function buildVideoPrompt(sceneData) {
   const scene = sceneData.scene || {};
-
   const parts = [];
 
-  if (scene.title) {
-    parts.push(`Scene: ${scene.title}.`);
-  }
-
-  if (scene.description) {
-    parts.push(scene.description);
-  }
-
-  if (sceneData.action) {
-    parts.push(`Action: ${sceneData.action}`);
-  }
+  if (scene.title) parts.push(`Scene: ${scene.title}.`);
+  if (scene.description) parts.push(scene.description);
+  if (sceneData.action) parts.push(`Action: ${sceneData.action}`);
 
   if (Array.isArray(sceneData.characters)) {
-    const names = sceneData.characters
-      .map((character) => character.name)
-      .filter(Boolean);
-
+    const names = sceneData.characters.map((c) => c.name).filter(Boolean);
     if (names.length > 0) {
-      parts.push(
-        `Characters present: ${names.join(", ")}.`
-      );
+      parts.push(`Characters present: ${names.join(", ")}.`);
     }
   }
 
   if (Array.isArray(sceneData.locations)) {
-    const locations = sceneData.locations
-      .map((location) => location.name)
-      .filter(Boolean);
-
+    const locations = sceneData.locations.map((l) => l.name).filter(Boolean);
     if (locations.length > 0) {
-      parts.push(
-        `Location: ${locations.join(", ")}.`
-      );
+      parts.push(`Location: ${locations.join(", ")}.`);
     }
   }
 
@@ -346,31 +241,24 @@ function buildVideoPrompt(sceneData) {
       .map((movement) => {
         const text = movement.text || movement.name || "";
         const destination = movement.destination || "";
-
-        if (text && destination) {
-          return `${text} toward ${destination}`;
-        }
-
-        return text;
+        return text && destination ? `${text} toward ${destination}` : text;
       })
       .filter(Boolean);
 
     if (movements.length > 0) {
-      parts.push(
-        `Movement: ${movements.join(". ")}.`
-      );
+      parts.push(`Movement: ${movements.join(". ")}.`);
     }
   }
 
-  if (sceneData.dialogue) {
-    parts.push(`Dialogue: ${sceneData.dialogue}`);
-  }
+  if (sceneData.dialogue) parts.push(`Dialogue: ${sceneData.dialogue}`);
 
-  if (sceneData.visualStyle?.text) {
-    parts.push(
-      `Visual style: ${sceneData.visualStyle.text}`
-    );
-  }
+  // visualStyle peut être un objet { text } ou une simple chaîne
+  const styleText =
+    typeof sceneData.visualStyle === "string"
+      ? sceneData.visualStyle
+      : sceneData.visualStyle?.text;
+
+  if (styleText) parts.push(`Visual style: ${styleText}`);
 
   parts.push(
     "Cinematic realistic video, natural human movement, realistic facial expressions, subtle camera movement, realistic lighting, coherent environment."
@@ -380,23 +268,16 @@ function buildVideoPrompt(sceneData) {
 }
 
 /* =========================================================
-   NORMALISER UNE IMAGE POUR HUGGING FACE
+   IMAGE -> ENTRÉE GRADIO
 ========================================================= */
 
 function normalizeImageUrl(imageUrl) {
-  if (!imageUrl) {
-    return null;
-  }
+  if (!imageUrl) return null;
 
-  // URL complète
-  if (
-    imageUrl.startsWith("http://") ||
-    imageUrl.startsWith("https://")
-  ) {
+  if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")) {
     return imageUrl;
   }
 
-  // Chemin local /uploads/...
   if (imageUrl.startsWith("/uploads/")) {
     return `${process.env.PUBLIC_BACKEND_URL || ""}${imageUrl}`;
   }
@@ -404,11 +285,54 @@ function normalizeImageUrl(imageUrl) {
   return imageUrl;
 }
 
+// Si l'image est dans /uploads, on la lit sur le disque et on l'envoie
+// directement au Space (plus fiable que de lui faire télécharger une URL).
+async function loadImageInput(imageUrl) {
+  try {
+    const pathname = new URL(imageUrl, "http://localhost").pathname;
+
+    if (pathname.startsWith("/uploads/")) {
+      const file = path.join(
+        uploadsDir,
+        path.basename(decodeURIComponent(pathname))
+      );
+
+      if (fs.existsSync(file)) {
+        const buffer = await fs.promises.readFile(file);
+        const type = file.toLowerCase().endsWith(".png")
+          ? "image/png"
+          : "image/jpeg";
+
+        console.log("Image lue depuis le disque:", file);
+        return handle_file(new Blob([buffer], { type }));
+      }
+    }
+  } catch (error) {
+    console.warn("Lecture locale impossible, repli sur l'URL:", error.message);
+  }
+
+  return handle_file(imageUrl);
+}
+
+function toNumber(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 /* =========================================================
    GÉNÉRATION VIDÉO WAN 2.2
 ========================================================= */
 
 app.post("/api/generate-video", async (req, res) => {
+  if (generating) {
+    return res.status(429).json({
+      success: false,
+      message: "Une génération est déjà en cours. Réessaie dans un instant.",
+    });
+  }
+
+  generating = true;
+
   try {
     console.log("======================================");
     console.log(" DEMANDE VIDEO WAN 2.2");
@@ -417,9 +341,7 @@ app.post("/api/generate-video", async (req, res) => {
     if (!HF_TOKEN) {
       return res.status(500).json({
         success: false,
-
-        message:
-          "HF_TOKEN n'est pas configuré dans Railway.",
+        message: "HF_TOKEN n'est pas configuré dans Railway.",
       });
     }
 
@@ -428,244 +350,184 @@ app.post("/api/generate-video", async (req, res) => {
     if (!sceneData) {
       return res.status(400).json({
         success: false,
-
         message: "Aucune donnée reçue.",
       });
     }
 
-    /* -----------------------------------------
-       IMAGE
-    ----------------------------------------- */
+    /* ---------- IMAGE ---------- */
 
-    let imageUrl =
-      sceneData.imageUrl ||
-      findFirstImage(sceneData);
-
-    imageUrl = normalizeImageUrl(imageUrl);
+    const imageUrl = normalizeImageUrl(
+      sceneData.imageUrl || findFirstImage(sceneData)
+    );
 
     if (!imageUrl) {
       return res.status(400).json({
         success: false,
-
-        message:
-          "Aucune image de départ trouvée pour la génération vidéo.",
+        message: "Aucune image de départ trouvée pour la génération vidéo.",
       });
     }
 
-    /* -----------------------------------------
-       PROMPT
-    ----------------------------------------- */
+    /* ---------- PROMPT ---------- */
 
-    const prompt =
-      sceneData.prompt ||
-      buildVideoPrompt(sceneData);
+    const prompt = sceneData.prompt || buildVideoPrompt(sceneData);
 
-    /* -----------------------------------------
-       PARAMÈTRES WAN
-    ----------------------------------------- */
+    /* ---------- PARAMÈTRES ---------- */
 
-    let duration = Number(
-      sceneData.duration ||
-        sceneData.scene?.duration ||
-        5
-    );
-
-    if (!Number.isFinite(duration)) {
-      duration = 5;
-    }
-
-    // Wan 2.2 Fast est destiné aux clips courts.
-    duration = Math.min(
-      Math.max(duration, 1),
+    // Wan 2.2 Fast est destiné aux clips courts
+    const duration = Math.min(
+      Math.max(
+        toNumber(sceneData.duration ?? sceneData.scene?.duration, 5),
+        1
+      ),
       5
     );
 
-    let steps = Number(
-      sceneData.steps || 6
-    );
-
-    if (!Number.isFinite(steps)) {
-      steps = 6;
-    }
-
-    steps = Math.min(
-      Math.max(Math.round(steps), 1),
+    const steps = Math.min(
+      Math.max(Math.round(toNumber(sceneData.steps, 6)), 1),
       20
     );
 
-    let guidanceScale = Number(
-      sceneData.guidanceScale ?? 1
-    );
-
-    if (!Number.isFinite(guidanceScale)) {
-      guidanceScale = 1;
-    }
-
-    let guidanceScale2 = Number(
-      sceneData.guidanceScale2 ?? 1
-    );
-
-    if (!Number.isFinite(guidanceScale2)) {
-      guidanceScale2 = 1;
-    }
-
-    let seed = Number(
-      sceneData.seed ?? 42
-    );
-
-    if (!Number.isFinite(seed)) {
-      seed = 42;
-    }
-
-    const randomizeSeed =
-      sceneData.randomizeSeed !== false;
+    const guidanceScale = toNumber(sceneData.guidanceScale, 1);
+    const guidanceScale2 = toNumber(sceneData.guidanceScale2, 1);
+    const seed = toNumber(sceneData.seed, 42);
+    const randomizeSeed = sceneData.randomizeSeed !== false;
 
     const negativePrompt =
       sceneData.negativePrompt ||
       "blurry, distorted, low quality, deformed, unrealistic movement, extra limbs, duplicated person";
 
     console.log("Image:", imageUrl);
-
     console.log("Prompt:", prompt);
-
     console.log("Duration:", duration);
-
     console.log("Steps:", steps);
 
-    /* -----------------------------------------
-       CONNEXION GRADIO
-    ----------------------------------------- */
+    /* ---------- CONNEXION GRADIO ---------- */
 
-    console.log(
-      "Connexion à Hugging Face Space:",
-      HF_SPACE
-    );
+    console.log("Connexion à Hugging Face Space:", HF_SPACE);
 
-    const client = await Client.connect(
-      HF_SPACE,
-      {
-        token: HF_TOKEN,
+    // Selon la version de @gradio/client, l'option s'appelle hf_token ou token
+    const client = await Client.connect(HF_SPACE, {
+      hf_token: HF_TOKEN,
+      token: HF_TOKEN,
+    });
+
+    console.log("Connexion Hugging Face réussie.");
+
+    if (DEBUG_API) {
+      console.log("=== view_api ===");
+      console.log(JSON.stringify(await client.view_api(), null, 2));
+      console.log("================");
+    }
+
+    /* ---------- APPEL WAN 2.2 ---------- */
+
+    const image = await loadImageInput(imageUrl);
+
+    const job = client.submit("/generate_video", [
+      image,
+      prompt,
+      steps,
+      negativePrompt,
+      duration,
+      guidanceScale,
+      guidanceScale2,
+      seed,
+      randomizeSeed,
+    ]);
+
+    let result = null;
+    let lastStatus = null;
+
+    for await (const msg of job) {
+      if (msg.type === "status") {
+        lastStatus = msg;
+        console.log(
+          "STATUS",
+          msg.stage,
+          msg.queue_position ?? "",
+          msg.message ?? "",
+          msg.code ?? ""
+        );
       }
-    );
 
-    console.log(
-      "Connexion Hugging Face réussie."
-    );
+      if (msg.type === "data") {
+        result = msg;
+      }
+    }
 
-    /* -----------------------------------------
-       APPEL WAN 2.2
-    ----------------------------------------- */
+    if (!result) {
+      console.error("Aucun résultat. Dernier statut:", lastStatus);
 
-    const result = await client.predict(
-      "/generate_video",
-      [
-        imageUrl,
-        prompt,
-        steps,
-        negativePrompt,
-        duration,
-        guidanceScale,
-        guidanceScale2,
-        seed,
-        randomizeSeed,
-      ]
-    );
+      return res.status(502).json({
+        success: false,
+        message:
+          lastStatus?.message ||
+          "Le Space n'a renvoyé aucun résultat (quota ZeroGPU ou erreur du Space).",
+        code: lastStatus?.code || null,
+        stage: lastStatus?.stage || null,
+      });
+    }
 
-    console.log(
-      "Réponse Wan 2.2 reçue."
-    );
-
+    console.log("Réponse Wan 2.2 reçue.");
     console.log(result);
 
-    /* -----------------------------------------
-       RÉCUPÉRATION DU VIDEO
-    ----------------------------------------- */
+    /* ---------- RÉCUPÉRATION DE LA VIDÉO ---------- */
 
-    const output =
-      result?.data?.[0];
+    const output = result?.data?.[0];
 
     if (!output) {
       return res.status(500).json({
         success: false,
-
-        message:
-          "Wan 2.2 n'a pas retourné de vidéo.",
-
+        message: "Wan 2.2 n'a pas retourné de vidéo.",
         result,
       });
     }
 
+    // Le composant vidéo peut renvoyer { video: { url } } ou { url } ou une chaîne
+    const videoFile = output.video || output;
+
     let videoUrl = null;
 
-    if (typeof output === "string") {
-      videoUrl = output;
-    } else if (output.url) {
-      videoUrl = output.url;
-    } else if (output.path) {
-      videoUrl = output.path;
+    if (typeof videoFile === "string") {
+      videoUrl = videoFile;
+    } else if (videoFile?.url) {
+      videoUrl = videoFile.url;
+    } else if (videoFile?.path) {
+      videoUrl = videoFile.path;
     }
 
     if (!videoUrl) {
       return res.status(500).json({
         success: false,
-
         message:
           "La vidéo a été générée mais son URL n'a pas pu être récupérée.",
-
         output,
       });
     }
 
-    console.log(
-      "Video URL:",
-      videoUrl
-    );
-
-    /* -----------------------------------------
-       RÉPONSE FRONTEND
-    ----------------------------------------- */
+    console.log("Video URL:", videoUrl);
 
     res.json({
       success: true,
-
-      message:
-        "Vidéo générée avec Wan 2.2.",
-
-      video: {
-        url: videoUrl,
-      },
-
+      message: "Vidéo générée avec Wan 2.2.",
+      video: { url: videoUrl },
       prompt,
-
       duration,
-
       steps,
     });
   } catch (error) {
-    console.error(
-      "======================================"
-    );
-
-    console.error(
-      "ERREUR GENERATION WAN 2.2"
-    );
-
-    console.error(error);
-
-    console.error(
-      "======================================"
-    );
+    console.error("======================================");
+    console.error("ERREUR GENERATION WAN 2.2");
+    console.dir(error, { depth: 5 });
+    console.error("======================================");
 
     res.status(500).json({
       success: false,
-
-      message:
-        "Erreur pendant la génération vidéo Wan 2.2.",
-
-      error:
-        error?.message ||
-        String(error),
+      message: "Erreur pendant la génération vidéo Wan 2.2.",
+      error: error?.message || error?.title || String(error),
     });
+  } finally {
+    generating = false;
   }
 });
 
@@ -673,53 +535,29 @@ app.post("/api/generate-video", async (req, res) => {
    ERREUR MULTER / SERVEUR
 ========================================================= */
 
-app.use(
-  (error, _req, res, _next) => {
-    console.error(
-      "ERREUR SERVEUR:",
-      error
-    );
+app.use((error, _req, res, _next) => {
+  console.error("ERREUR SERVEUR:", error);
 
-    if (
-      error instanceof multer.MulterError
-    ) {
-      return res.status(400).json({
-        success: false,
-
-        message:
-          "Erreur Multer lors de l'envoi du fichier.",
-
-        error: error.message,
-
-        code: error.code,
-      });
-    }
-
+  if (error instanceof multer.MulterError) {
     return res.status(400).json({
       success: false,
-
-      message:
-        error.message ||
-        "Erreur serveur.",
+      message: "Erreur Multer lors de l'envoi du fichier.",
+      error: error.message,
+      code: error.code,
     });
   }
-);
+
+  return res.status(400).json({
+    success: false,
+    message: error.message || "Erreur serveur.",
+  });
+});
 
 /* =========================================================
    START
 ========================================================= */
 
-app.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `Cinema AI backend démarré sur le port ${PORT}`
-    );
-
-    console.log(
-      `Wan 2.2 configuré: ${Boolean(HF_TOKEN)}`
-    );
-  }
-);
-
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Cinema AI backend démarré sur le port ${PORT}`);
+  console.log(`Wan 2.2 configuré: ${Boolean(HF_TOKEN)}`);
+});
