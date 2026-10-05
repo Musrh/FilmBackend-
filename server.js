@@ -1,4 +1,3 @@
-
 import express from "express";
 import cors from "cors";
 import multer from "multer";
@@ -356,103 +355,36 @@ app.get("/api/test-huggingface", async (_req, res) => {
 
 async function waitForWanJob(job) {
   const startedAt = Date.now();
-  let timeoutTimer;
 
-  const jobPromise = (async () => {
+  // IMPORTANT : on n'utilise PAS "for await ... return" car un return dans la
+  // boucle appelle job.return() du client Gradio, qui peut rester bloqué
+  // indéfiniment après "complete". On lit l'itérateur à la main et on
+  // résout la promesse dès que la vidéo est disponible.
+  return new Promise((resolve, reject) => {
+    let settled = false;
     let finalVideo = null;
     let lastStatus = null;
     let dataReceived = false;
+    let graceTimer = null;
 
-    for await (const message of job) {
-      if (!message) continue;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      clearTimeout(graceTimer);
+      fn(value);
+    };
 
-      if (message.type === "status") {
-        lastStatus = message;
-        const stage = message.stage || message.status || "unknown";
-        const position = message.position ?? "?";
-        const queueSize = message.size ?? message.queue_size ?? "?";
-        const elapsed = Math.round((Date.now() - startedAt) / 1000);
-
-        console.log(
-          `[WAN STATUS] stage=${stage} | position=${position} | queue=${queueSize} | ETA=${formatEta(message.eta)} | elapsed=${elapsed}s`,
-        );
-
-        if (stage === "error") {
-          throw new Error(
-            message.message ||
-              message.code ||
-              "Le Space Wan 2.2 a signalé une erreur.",
-          );
-        }
-
-        // Gradio peut laisser l'itérateur ouvert après le statut terminal.
-        // Répondre dès que le résultat et le statut complete sont disponibles.
-        if (stage === "complete") {
-          if (finalVideo) {
-            console.log("[WAN] Résultat complet reçu.");
-            return { video: finalVideo, status: message };
-          }
-
-          if (dataReceived) {
-            throw new Error(
-              "Wan 2.2 a terminé, mais la donnée reçue ne contient pas d’URL vidéo exploitable.",
-            );
-          }
-        }
-      }
-
-      if (message.type === "data") {
-        console.log("[WAN DATA] Résultat reçu.");
-        dataReceived = true;
-
-        const video = extractVideoValue(message.data);
-        if (video) {
-          finalVideo = video;
-
-          // Gérer aussi le cas où complete arrive avant le dernier événement data.
-          const lastStage = lastStatus?.stage || lastStatus?.status;
-          if (lastStage === "complete") {
-            console.log("[WAN] Résultat complet reçu.");
-            return { video: finalVideo, status: lastStatus };
-          }
-        }
-      }
-    }
-
-    if (!finalVideo) {
-      throw new Error(
-        "Le job Wan 2.2 est terminé mais aucune vidéo n'a été retournée.",
-      );
-    }
-
-    return { video: finalVideo, status: lastStatus };
-  })();
-
-  const timeoutPromise = new Promise((_, reject) => {
-    timeoutTimer = setTimeout(() => {
+    const timeoutTimer = setTimeout(() => {
       const elapsed = Math.round((Date.now() - startedAt) / 1000);
       console.error(`Timeout Wan 2.2 après ${elapsed}s.`);
-
-      // Annuler le job sans laisser un appel d'annulation bloqué dépasser le timeout.
-      if (typeof job?.cancel === "function") {
-        try {
-          Promise.resolve(job.cancel()).then(
-            () => console.log("Job Wan 2.2 annulé."),
-            (error) =>
-              console.error(
-                "Erreur pendant l'annulation:",
-                error?.message || error,
-              ),
-          );
-        } catch (error) {
-          console.error(
-            "Erreur pendant l'annulation:",
-            error?.message || error,
-          );
+      try {
+        if (typeof job?.cancel === "function") {
+          Promise.resolve(job.cancel()).catch(() => {});
         }
-      }
-
-      reject(
+      } catch {}
+      finish(
+        reject,
         new Error(
           `Le Space Wan 2.2 n'a pas terminé après ${Math.round(
             WAN_TIMEOUT_MS / 60000,
@@ -460,13 +392,104 @@ async function waitForWanJob(job) {
         ),
       );
     }, WAN_TIMEOUT_MS);
-  });
 
-  try {
-    return await Promise.race([jobPromise, timeoutPromise]);
-  } finally {
-    clearTimeout(timeoutTimer);
+    const iterator = job[Symbol.asyncIterator]
+      ? job[Symbol.asyncIterator]()
+      : job;
+
+    (async () => {
+      try {
+        while (!settled) {
+          const { value: message, done } = await iterator.next();
+          if (done) break;
+          if (!message) continue;
+
+          if (message.type === "status") {
+            lastStatus = message;
+            const stage = message.stage || message.status || "unknown";
+            const elapsed = Math.round((Date.now() - startedAt) / 1000);
+            console.log(
+              `[WAN STATUS] stage=${stage} | position=${message.position ?? "?"} | queue=${message.size ?? message.queue_size ?? "?"} | ETA=${formatEta(message.eta)} | elapsed=${elapsed}s`,
+            );
+
+            if (stage === "error") {
+              return finish(
+                reject,
+                new Error(
+                  message.message ||
+                    message.code ||
+                    "Le Space Wan 2.2 a signalé une erreur.",
+                ),
+              );
+            }
+
+            if (stage === "complete") {
+              if (finalVideo) {
+                console.log("[WAN] Résultat complet reçu.");
+                return finish(resolve, { video: finalVideo, status: message });
+              }
+              // Laisser 15 s au dernier événement "data" pour arriver.
+              graceTimer = setTimeout(() => {
+                if (finalVideo) {
+                  finish(resolve, { video: finalVideo, status: lastStatus });
+                } else {
+                  finish(
+                    reject,
+                    new Error(
+                      dataReceived
+                        ? "Wan 2.2 a terminé, mais la donnée reçue ne contient pas d’URL vidéo exploitable."
+                        : "Wan 2.2 a terminé sans renvoyer de vidéo.",
+                    ),
+                  );
+                }
+              }, 15000);
+            }
+          }
+
+          if (message.type === "data") {
+            console.log("[WAN DATA] Résultat reçu.");
+            dataReceived = true;
+            const video = extractVideoValue(message.data);
+            if (video) {
+              finalVideo = video;
+              console.log("[WAN DATA] URL vidéo:", video);
+              // La donnée est là : on n'attend pas forcément "complete".
+              return finish(resolve, { video: finalVideo, status: lastStatus });
+            } else {
+              console.log(
+                "[WAN DATA] Contenu brut:",
+                JSON.stringify(message.data).slice(0, 1000),
+              );
+            }
+          }
+        }
+
+        if (finalVideo) finish(resolve, { video: finalVideo, status: lastStatus });
+        else
+          finish(
+            reject,
+            new Error("Le job Wan 2.2 est terminé mais aucune vidéo n'a été retournée."),
+          );
+      } catch (error) {
+        finish(reject, error);
+      }
+    })();
+  });
+}
+
+// Télécharge la vidéo depuis Hugging Face (URL temporaire, parfois protégée)
+// et la sert depuis /uploads pour que le frontend ait une URL stable.
+async function saveVideoLocally(videoUrl, req) {
+  const headers = HF_TOKEN ? { Authorization: `Bearer ${HF_TOKEN}` } : {};
+  const response = await fetch(videoUrl, { headers });
+  if (!response.ok) {
+    throw new Error(`Téléchargement vidéo impossible. HTTP ${response.status}`);
   }
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-wan.mp4`;
+  fs.writeFileSync(path.join(uploadsDir, filename), buffer);
+  console.log("Vidéo enregistrée:", filename, buffer.length, "bytes");
+  return `${req.protocol}://${req.get("host")}/uploads/${filename}`;
 }
 
 function numberOr(value, fallback) {
@@ -574,11 +597,20 @@ app.post("/api/generate-video", async (req, res) => {
     console.log(`Vidéo Wan 2.2 terminée après ${elapsed}s.`);
     console.log("URL vidéo:", result.video);
 
+    let publicVideo = result.video;
+    try {
+      publicVideo = await saveVideoLocally(result.video, req);
+    } catch (error) {
+      console.error("Copie locale échouée, URL Hugging Face renvoyée:", error?.message);
+    }
+
     return res.json({
       success: true,
-      video: result.video,
+      video: publicVideo,
+      videoUrl: publicVideo,
+      originalVideoUrl: result.video,
       result: {
-        video: result.video,
+        video: publicVideo,
         status: result.status,
         duration: finalDuration,
         elapsedSeconds: elapsed,
