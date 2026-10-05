@@ -1,4 +1,11 @@
-
+Gmail, c'est encore mieux dans l'appli
+Une messagerie sécurisée, rapide et organisée
+Ouvrir
+M
+M
+MUSTAPHA HOME
+à moi
+il y a 0 minuteDétails
 import express from "express";
 import cors from "cors";
 import multer from "multer";
@@ -361,6 +368,7 @@ async function waitForWanJob(job) {
   const jobPromise = (async () => {
     let finalVideo = null;
     let lastStatus = null;
+    let dataReceived = false;
 
     for await (const message of job) {
       if (!message) continue;
@@ -383,12 +391,38 @@ async function waitForWanJob(job) {
               "Le Space Wan 2.2 a signalé une erreur.",
           );
         }
+
+        // Gradio peut laisser l'itérateur ouvert après le statut terminal.
+        // Répondre dès que le résultat et le statut complete sont disponibles.
+        if (stage === "complete") {
+          if (finalVideo) {
+            console.log("[WAN] Résultat complet reçu.");
+            return { video: finalVideo, status: message };
+          }
+
+          if (dataReceived) {
+            throw new Error(
+              "Wan 2.2 a terminé, mais la donnée reçue ne contient pas d’URL vidéo exploitable.",
+            );
+          }
+        }
       }
 
       if (message.type === "data") {
         console.log("[WAN DATA] Résultat reçu.");
+        dataReceived = true;
+
         const video = extractVideoValue(message.data);
-        if (video) finalVideo = video;
+        if (video) {
+          finalVideo = video;
+
+          // Gérer aussi le cas où complete arrive avant le dernier événement data.
+          const lastStage = lastStatus?.stage || lastStatus?.status;
+          if (lastStage === "complete") {
+            console.log("[WAN] Résultat complet reçu.");
+            return { video: finalVideo, status: lastStatus };
+          }
+        }
       }
     }
 
@@ -406,7 +440,7 @@ async function waitForWanJob(job) {
       const elapsed = Math.round((Date.now() - startedAt) / 1000);
       console.error(`Timeout Wan 2.2 après ${elapsed}s.`);
 
-      // Request cancellation without letting a stalled cancel call defeat the timeout.
+      // Annuler le job sans laisser un appel d'annulation bloqué dépasser le timeout.
       if (typeof job?.cancel === "function") {
         try {
           Promise.resolve(job.cancel()).then(
@@ -480,13 +514,12 @@ app.post("/api/generate-video", async (req, res) => {
     } = req.body || {};
 
     const data = sceneData || scene || {};
-    let finalImageUrl = normalizeImageUrl(imageUrl || findFirstImage(data));
+    const finalImageUrl = normalizeImageUrl(imageUrl || findFirstImage(data));
 
     if (!finalImageUrl) {
       return res.status(400).json({
         success: false,
-        error:
-          "Aucune image de référence n'a été trouvée pour cette scène.",
+        error: "Aucune image de référence n'a été trouvée pour cette scène.",
       });
     }
 
@@ -500,6 +533,7 @@ app.post("/api/generate-video", async (req, res) => {
           `Impossible de télécharger l'image. HTTP ${imageResponse.status}`,
         );
       }
+
       imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
       console.log("Image téléchargée:", imageBuffer.length, "bytes");
     } else {
@@ -507,6 +541,7 @@ app.post("/api/generate-video", async (req, res) => {
       if (!fs.existsSync(localPath)) {
         throw new Error(`Image introuvable: ${localPath}`);
       }
+
       imageBuffer = fs.readFileSync(localPath);
       console.log("Image lue depuis le disque:", localPath);
     }
@@ -570,6 +605,7 @@ app.post("/api/generate-video", async (req, res) => {
   }
 });
 
+// Route de test/compatibilité ; la génération Wan passe par /api/generate-video.
 app.post("/api/generate", (req, res) => {
   const { prompt, scene } = req.body || {};
   return res.json({
