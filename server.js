@@ -11,15 +11,21 @@ import ffmpegPath from "ffmpeg-static";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
 const app = express();
 
 const PORT = Number(process.env.PORT || 3000);
+
 const HF_TOKEN = process.env.HF_TOKEN;
+
 const HF_SPACE =
-  process.env.HF_SPACE || "zerogpu-aoti/wan2-2-fp8da-aoti-faster";
+  process.env.HF_SPACE ||
+  "zerogpu-aoti/wan2-2-fp8da-aoti-faster";
 
 const WAN_TIMEOUT_MS = 8 * 60 * 1000;
+
 const WAN_MAX_SEGMENT_DURATION = 5;
+
 const MAX_UPLOAD_SIZE = 500 * 1024 * 1024;
 
 const uploadsDir = path.join(__dirname, "uploads");
@@ -28,12 +34,29 @@ fs.mkdirSync(uploadsDir, { recursive: true });
 
 app.set("trust proxy", 1);
 
-app.use(cors({ origin: "*" }));
+app.use(
+  cors({
+    origin: "*",
+  })
+);
 
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+app.use(
+  express.json({
+    limit: "50mb",
+  })
+);
 
-app.use("/uploads", express.static(uploadsDir));
+app.use(
+  express.urlencoded({
+    extended: true,
+    limit: "50mb",
+  })
+);
+
+app.use(
+  "/uploads",
+  express.static(uploadsDir)
+);
 
 
 // ============================================================
@@ -62,6 +85,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
+
   limits: {
     fileSize: MAX_UPLOAD_SIZE,
   },
@@ -126,23 +150,130 @@ function formatEta(eta) {
 
 
 // ============================================================
+// EXTRACTION VIDEO GRADIO / WAN
+// ============================================================
+
+function extractVideoValue(value) {
+  if (!value) {
+    return null;
+  }
+
+  // ----------------------------------------------------------
+  // Chaîne
+  // ----------------------------------------------------------
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+
+    if (!trimmed) {
+      return null;
+    }
+
+    // URL HTTP/HTTPS
+    if (/^https?:\/\//i.test(trimmed)) {
+      return trimmed;
+    }
+
+    // Certaines réponses peuvent contenir
+    // directement un chemin vidéo.
+    if (
+      /\.(mp4|webm|mov|m4v)(\?.*)?$/i.test(
+        trimmed
+      )
+    ) {
+      return trimmed;
+    }
+
+    return null;
+  }
+
+
+  // ----------------------------------------------------------
+  // Tableau
+  // ----------------------------------------------------------
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const result = extractVideoValue(item);
+
+      if (result) {
+        return result;
+      }
+    }
+
+    return null;
+  }
+
+
+  // ----------------------------------------------------------
+  // Objet
+  // ----------------------------------------------------------
+
+  if (
+    typeof value === "object" &&
+    value !== null
+  ) {
+    // Formats fréquents retournés par Gradio
+    const candidates = [
+      value.url,
+      value.video,
+      value.path,
+      value.file,
+      value.name,
+    ];
+
+    for (const candidate of candidates) {
+      const result =
+        extractVideoValue(candidate);
+
+      if (result) {
+        return result;
+      }
+    }
+
+
+    // Recherche récursive dans l'objet
+    for (const key of Object.keys(value)) {
+      const result =
+        extractVideoValue(value[key]);
+
+      if (result) {
+        return result;
+      }
+    }
+  }
+
+  return null;
+}
+
+
+// ============================================================
 // IMAGE HANDLING
 // ============================================================
 
 function normalizeImageUrl(value) {
-  if (!value || typeof value !== "string") {
+  if (
+    !value ||
+    typeof value !== "string"
+  ) {
     return null;
   }
 
-  if (/^https?:\/\//i.test(value)) {
+  if (
+    /^https?:\/\//i.test(value)
+  ) {
     return value;
   }
 
-  if (value.startsWith("/uploads/")) {
+  if (
+    value.startsWith("/uploads/")
+  ) {
     return value;
   }
 
-  if (value.startsWith("uploads/")) {
+  if (
+    value.startsWith("uploads/")
+  ) {
     return `/${value}`;
   }
 
@@ -151,34 +282,49 @@ function normalizeImageUrl(value) {
 
 
 function findFirstImage(scene) {
-  if (!scene || typeof scene !== "object") {
+  if (
+    !scene ||
+    typeof scene !== "object"
+  ) {
     return null;
   }
 
   if (scene.imageUrl) {
-    return normalizeImageUrl(scene.imageUrl);
+    return normalizeImageUrl(
+      scene.imageUrl
+    );
   }
 
   if (scene.image) {
-    return normalizeImageUrl(scene.image);
+    return normalizeImageUrl(
+      scene.image
+    );
   }
+
 
   const getUrl = (image) => {
     if (typeof image === "string") {
       return normalizeImageUrl(image);
     }
 
-    if (!image || typeof image !== "object") {
+    if (
+      !image ||
+      typeof image !== "object"
+    ) {
       return null;
     }
 
     return normalizeImageUrl(
-      image.storageUrl || image.url
+      image.storageUrl ||
+        image.url
     );
   };
 
 
+  // ----------------------------------------------------------
   // Personnages + lieux
+  // ----------------------------------------------------------
+
   for (const group of [
     scene.characters,
     scene.locations,
@@ -192,8 +338,12 @@ function findFirstImage(scene) {
         continue;
       }
 
+
       // Plusieurs images
-      for (const image of item.imageReferences || []) {
+      for (
+        const image of
+        item.imageReferences || []
+      ) {
         const url = getUrl(image);
 
         if (url) {
@@ -201,10 +351,13 @@ function findFirstImage(scene) {
         }
       }
 
+
       // Image directe
-      const direct = normalizeImageUrl(
-        item.imageUrl || item.image
-      );
+      const direct =
+        normalizeImageUrl(
+          item.imageUrl ||
+            item.image
+        );
 
       if (direct) {
         return direct;
@@ -213,8 +366,14 @@ function findFirstImage(scene) {
   }
 
 
+  // ----------------------------------------------------------
   // Images de référence de scène
-  for (const image of scene.referenceImages || []) {
+  // ----------------------------------------------------------
+
+  for (
+    const image of
+    scene.referenceImages || []
+  ) {
     const url = getUrl(image);
 
     if (url) {
@@ -223,8 +382,14 @@ function findFirstImage(scene) {
   }
 
 
+  // ----------------------------------------------------------
   // Images du style visuel
-  for (const image of scene.visualStyle?.images || []) {
+  // ----------------------------------------------------------
+
+  for (
+    const image of
+    scene.visualStyle?.images || []
+  ) {
     const url = getUrl(image);
 
     if (url) {
@@ -237,19 +402,24 @@ function findFirstImage(scene) {
 
 
 function resolveLocalUploadPath(imageUrl) {
-  const relative = imageUrl.replace(/^\/+/, "");
+  const relative =
+    imageUrl.replace(/^\/+/, "");
 
-  const resolved = path.resolve(
-    __dirname,
-    relative
-  );
+  const resolved =
+    path.resolve(
+      __dirname,
+      relative
+    );
 
   const uploadsRoot =
     `${path.resolve(uploadsDir)}${path.sep}`;
 
   if (
-    resolved !== path.resolve(uploadsDir) &&
-    !resolved.startsWith(uploadsRoot)
+    resolved !==
+      path.resolve(uploadsDir) &&
+    !resolved.startsWith(
+      uploadsRoot
+    )
   ) {
     throw new Error(
       "Le chemin de l'image n'est pas autorisé."
@@ -268,12 +438,19 @@ function buildVideoPrompt(
   scene,
   { includeAction = true } = {}
 ) {
-  if (!scene || typeof scene !== "object") {
+  if (
+    !scene ||
+    typeof scene !== "object"
+  ) {
     return "Create a cinematic realistic video.";
   }
 
   const parts = [];
 
+
+  // ----------------------------------------------------------
+  // Description
+  // ----------------------------------------------------------
 
   if (scene.description) {
     parts.push(
@@ -282,26 +459,42 @@ function buildVideoPrompt(
   }
 
 
-  if (includeAction && scene.action) {
+  // ----------------------------------------------------------
+  // Action
+  // ----------------------------------------------------------
+
+  if (
+    includeAction &&
+    scene.action
+  ) {
     parts.push(
       `Action and staging: ${scene.action}`
     );
   }
 
 
+  // ----------------------------------------------------------
   // Personnages
-  if (Array.isArray(scene.characters)) {
-    const characters = scene.characters
-      .filter(Boolean)
-      .map((character) => {
-        const name =
-          character.name || "character";
+  // ----------------------------------------------------------
 
-        return character.description
-          ? `${name}: ${character.description}`
-          : name;
-      })
-      .join(", ");
+  if (
+    Array.isArray(
+      scene.characters
+    )
+  ) {
+    const characters =
+      scene.characters
+        .filter(Boolean)
+        .map((character) => {
+          const name =
+            character.name ||
+            "character";
+
+          return character.description
+            ? `${name}: ${character.description}`
+            : name;
+        })
+        .join(", ");
 
     if (characters) {
       parts.push(
@@ -311,19 +504,27 @@ function buildVideoPrompt(
   }
 
 
+  // ----------------------------------------------------------
   // Lieux
-  if (Array.isArray(scene.locations)) {
-    const locations = scene.locations
-      .filter(Boolean)
-      .map(
-        (location) =>
-          location.name ||
-          location.title ||
-          location.description ||
-          ""
-      )
-      .filter(Boolean)
-      .join(", ");
+  // ----------------------------------------------------------
+
+  if (
+    Array.isArray(
+      scene.locations
+    )
+  ) {
+    const locations =
+      scene.locations
+        .filter(Boolean)
+        .map(
+          (location) =>
+            location.name ||
+            location.title ||
+            location.description ||
+            ""
+        )
+        .filter(Boolean)
+        .join(", ");
 
     if (locations) {
       parts.push(
@@ -333,25 +534,33 @@ function buildVideoPrompt(
   }
 
 
+  // ----------------------------------------------------------
   // Mouvements
-  if (Array.isArray(scene.movements)) {
-    const movements = scene.movements
-      .filter(Boolean)
-      .map((movement) => {
-        const action =
-          movement.action ||
-          movement.name ||
-          movement.description ||
-          "";
+  // ----------------------------------------------------------
 
-        return `${action}${
-          movement.destination
-            ? ` toward ${movement.destination}`
-            : ""
-        }`;
-      })
-      .filter(Boolean)
-      .join(". ");
+  if (
+    Array.isArray(
+      scene.movements
+    )
+  ) {
+    const movements =
+      scene.movements
+        .filter(Boolean)
+        .map((movement) => {
+          const action =
+            movement.action ||
+            movement.name ||
+            movement.description ||
+            "";
+
+          return `${action}${
+            movement.destination
+              ? ` toward ${movement.destination}`
+              : ""
+          }`;
+        })
+        .filter(Boolean)
+        .join(". ");
 
     if (movements) {
       parts.push(
@@ -361,7 +570,10 @@ function buildVideoPrompt(
   }
 
 
+  // ----------------------------------------------------------
   // Dialogue
+  // ----------------------------------------------------------
+
   if (scene.dialogue) {
     parts.push(
       `Dialogue context: ${scene.dialogue}`
@@ -369,11 +581,15 @@ function buildVideoPrompt(
   }
 
 
+  // ----------------------------------------------------------
   // Style
+  // ----------------------------------------------------------
+
   const style =
     typeof scene.visualStyle === "string"
       ? scene.visualStyle
-      : scene.visualStyle?.text || "";
+      : scene.visualStyle?.text ||
+        "";
 
   if (style) {
     parts.push(
@@ -382,7 +598,10 @@ function buildVideoPrompt(
   }
 
 
+  // ----------------------------------------------------------
   // Consignes cinéma
+  // ----------------------------------------------------------
+
   parts.push(
     "Cinematic realistic video, natural human movement, realistic facial expressions, realistic body proportions, coherent environment, cinematic lighting, subtle camera movement, consistent characters and locations, high visual quality."
   );
@@ -399,34 +618,44 @@ function splitDurationIntoSegments(
   totalDuration
 ) {
   let remaining = Math.max(
-    numberOr(totalDuration, 1),
+    numberOr(
+      totalDuration,
+      1
+    ),
     1
   );
 
   const segments = [];
 
   while (remaining > 0) {
-    const duration = Math.min(
-      remaining,
-      WAN_MAX_SEGMENT_DURATION
-    );
+    const duration =
+      Math.min(
+        remaining,
+        WAN_MAX_SEGMENT_DURATION
+      );
 
     segments.push(
-      Number(duration.toFixed(2))
+      Number(
+        duration.toFixed(2)
+      )
     );
 
-    remaining = Number(
-      (remaining - duration).toFixed(2)
-    );
+    remaining =
+      Number(
+        (
+          remaining -
+          duration
+        ).toFixed(2)
+      );
   }
 
   return segments;
 }
 
 
-// Découpe le texte de l'action
-// en phrases utilisables pour construire
-// les segments internes.
+// ============================================================
+// PHRASES
+// ============================================================
 
 function splitTextIntoSentences(text) {
   if (
@@ -446,11 +675,16 @@ function splitTextIntoSentences(text) {
 }
 
 
-// Transforme la bibliothèque de mouvements
-// en éléments de timeline.
+// ============================================================
+// MOUVEMENTS
+// ============================================================
 
 function getMovementDescriptions(scene) {
-  if (!Array.isArray(scene?.movements)) {
+  if (
+    !Array.isArray(
+      scene?.movements
+    )
+  ) {
     return [];
   }
 
@@ -473,44 +707,55 @@ function getMovementDescriptions(scene) {
 }
 
 
-// Création automatique d'un prompt
-// spécifique pour chaque segment.
+// ============================================================
+// PROMPTS AUTOMATIQUES PAR SEGMENT
+// ============================================================
 
 function buildAutomaticSegmentPrompts(
   scene,
   basePrompt,
   durations
 ) {
-  const timeline = splitTextIntoSentences(
-    scene?.action || ""
-  );
+  const timeline =
+    splitTextIntoSentences(
+      scene?.action || ""
+    );
 
   timeline.push(
-    ...getMovementDescriptions(scene).map(
-      (movement) => `Movement: ${movement}`
+    ...getMovementDescriptions(
+      scene
+    ).map(
+      (movement) =>
+        `Movement: ${movement}`
     )
   );
 
-  const count = durations.length;
+  const count =
+    durations.length;
 
   return durations.map(
     (duration, index) => {
-      const start = Math.floor(
-        (index * timeline.length) / count
-      );
-
-      const end = Math.max(
-        start + 1,
+      const start =
         Math.floor(
-          ((index + 1) *
+          (index *
             timeline.length) /
             count
-        )
-      );
+        );
 
-      const focus = timeline
-        .slice(start, end)
-        .join(" ");
+      const end =
+        Math.max(
+          start + 1,
+          Math.floor(
+            ((index + 1) *
+              timeline.length) /
+              count
+          )
+        );
+
+      const focus =
+        timeline
+          .slice(start, end)
+          .join(" ");
 
       const continuity =
         index === 0
@@ -538,7 +783,7 @@ function buildAutomaticSegmentPrompts(
 
 
 // ============================================================
-// FFmpeg
+// FFMPEG
 // ============================================================
 
 function runFfmpeg(args) {
@@ -552,28 +797,33 @@ function runFfmpeg(args) {
         );
       }
 
-      const child = spawn(
-        ffmpegPath,
-        args,
-        {
-          stdio: [
-            "ignore",
-            "pipe",
-            "pipe",
-          ],
-        }
-      );
+      const child =
+        spawn(
+          ffmpegPath,
+          args,
+          {
+            stdio: [
+              "ignore",
+              "pipe",
+              "pipe",
+            ],
+          }
+        );
 
       let stderr = "";
 
       child.stderr.on(
         "data",
         (chunk) => {
-          stderr += chunk.toString();
+          stderr +=
+            chunk.toString();
         }
       );
 
-      child.on("error", reject);
+      child.on(
+        "error",
+        reject
+      );
 
       child.on(
         "close",
@@ -631,9 +881,11 @@ async function extractLastFrame(
   ]);
 
   return {
-    buffer: fs.readFileSync(
-      output
-    ),
+    buffer:
+      fs.readFileSync(
+        output
+      ),
+
     path: output,
   };
 }
@@ -693,8 +945,9 @@ async function concatenateVideos(
 
 
   try {
-    // Première tentative :
-    // concaténation sans réencodage.
+    // --------------------------------------------------------
+    // Première tentative : sans réencodage
+    // --------------------------------------------------------
 
     try {
       await runFfmpeg([
@@ -717,7 +970,9 @@ async function concatenateVideos(
         copyError.message
       );
 
-      // Fallback avec réencodage.
+      // ------------------------------------------------------
+      // Fallback H264
+      // ------------------------------------------------------
 
       await runFfmpeg([
         "-y",
@@ -741,7 +996,9 @@ async function concatenateVideos(
     }
   } finally {
     try {
-      fs.unlinkSync(listPath);
+      fs.unlinkSync(
+        listPath
+      );
     } catch {}
   }
 
@@ -783,21 +1040,19 @@ async function generateWanClip({
         imageBuffer,
         prompt,
         steps,
-
         "blurry, low quality, distorted face, deformed body, extra limbs, bad anatomy, text, watermark",
-
         duration,
-
         guidanceScale,
         guidanceScale2,
-
         seed,
         randomizeSeed,
       ]
     );
 
   const result =
-    await waitForWanJob(job);
+    await waitForWanJob(
+      job
+    );
 
   return result.video;
 }
@@ -816,16 +1071,23 @@ async function waitForWanJob(
   return new Promise(
     (resolve, reject) => {
       let settled = false;
+
       let finalVideo = null;
+
       let lastStatus = null;
+
       let dataReceived = false;
+
       let graceTimer = null;
+
 
       const finish = (
         fn,
         value
       ) => {
-        if (settled) return;
+        if (settled) {
+          return;
+        }
 
         settled = true;
 
@@ -877,11 +1139,19 @@ async function waitForWanJob(
             } =
               await iterator.next();
 
-            if (done) break;
-            if (!message) continue;
+            if (done) {
+              break;
+            }
+
+            if (!message) {
+              continue;
+            }
 
 
+            // ------------------------------------------------
             // STATUS
+            // ------------------------------------------------
+
             if (
               message.type ===
               "status"
@@ -896,9 +1166,10 @@ async function waitForWanJob(
 
               const elapsed =
                 Math.round(
-                  (Date.now() -
-                    startedAt) /
-                    1000
+                  (
+                    Date.now() -
+                    startedAt
+                  ) / 1000
                 );
 
               console.log(
@@ -915,6 +1186,7 @@ async function waitForWanJob(
               );
 
 
+              // Erreur Wan
               if (
                 stage ===
                 "error"
@@ -930,6 +1202,7 @@ async function waitForWanJob(
               }
 
 
+              // Job terminé
               if (
                 stage ===
                 "complete"
@@ -942,6 +1215,7 @@ async function waitForWanJob(
                     {
                       video:
                         finalVideo,
+
                       status:
                         message,
                     }
@@ -963,6 +1237,7 @@ async function waitForWanJob(
                           {
                             video:
                               finalVideo,
+
                             status:
                               lastStatus,
                           }
@@ -984,7 +1259,10 @@ async function waitForWanJob(
             }
 
 
+            // ------------------------------------------------
             // DATA
+            // ------------------------------------------------
+
             if (
               message.type ===
               "data"
@@ -995,6 +1273,11 @@ async function waitForWanJob(
               console.log(
                 "[WAN DATA] Résultat reçu."
               );
+
+
+              // IMPORTANT :
+              // Cette fonction corrige l'erreur
+              // "extractVideoValue is not defined".
 
               const video =
                 extractVideoValue(
@@ -1007,7 +1290,7 @@ async function waitForWanJob(
                   video;
 
                 console.log(
-                  "[WAN DATA] URL vidéo:",
+                  "[WAN DATA] Vidéo détectée:",
                   video
                 );
 
@@ -1015,6 +1298,7 @@ async function waitForWanJob(
                   resolve,
                   {
                     video,
+
                     status:
                       lastStatus,
                   }
@@ -1022,25 +1306,52 @@ async function waitForWanJob(
               }
 
 
+              // Diagnostic utile si
+              // la structure retournée
+              // par Gradio change.
+
+              let rawData = "";
+
+              try {
+                rawData =
+                  JSON.stringify(
+                    message.data
+                  );
+              } catch {
+                rawData =
+                  String(
+                    message.data
+                  );
+              }
+
+              console.log(
+                "[WAN DATA] Aucune vidéo détectée."
+              );
+
               console.log(
                 "[WAN DATA] Brut:",
-                JSON.stringify(
-                  message.data
-                ).slice(
+                rawData.slice(
                   0,
-                  3000
+                  5000
                 )
               );
             }
           }
 
 
-          if (finalVideo) {
+          // --------------------------------------------------
+          // FIN ITERATEUR
+          // --------------------------------------------------
+
+          if (
+            finalVideo
+          ) {
             return finish(
               resolve,
               {
                 video:
                   finalVideo,
+
                 status:
                   lastStatus,
               }
@@ -1073,6 +1384,27 @@ async function waitForWanJob(
 async function downloadRemoteFile(
   url
 ) {
+  if (
+    !url ||
+    typeof url !== "string"
+  ) {
+    throw new Error(
+      "URL de fichier distante invalide."
+    );
+  }
+
+  // ----------------------------------------------------------
+  // URL HTTP/HTTPS
+  // ----------------------------------------------------------
+
+  if (
+    !/^https?:\/\//i.test(url)
+  ) {
+    throw new Error(
+      `Le résultat Wan n'est pas une URL HTTP exploitable: ${url}`
+    );
+  }
+
   const headers =
     HF_TOKEN
       ? {
@@ -1100,6 +1432,10 @@ async function downloadRemoteFile(
   );
 }
 
+
+// ============================================================
+// SAUVEGARDE VIDÉO LOCALE
+// ============================================================
 
 async function saveVideoLocally(
   videoUrl,
@@ -1149,9 +1485,12 @@ app.get(
   (_req, res) => {
     res.json({
       success: true,
+
       service:
         "Cinema AI Backend",
-      status: "online",
+
+      status:
+        "online",
 
       wanSpace:
         HF_SPACE,
@@ -1176,9 +1515,13 @@ app.get(
   (_req, res) => {
     res.json({
       success: true,
-      status: "ok",
+
+      status:
+        "ok",
+
       hfConfigured:
         Boolean(HF_TOKEN),
+
       wanSpace:
         HF_SPACE,
     });
@@ -1199,6 +1542,7 @@ app.get(
           .status(500)
           .json({
             success: false,
+
             error:
               "HF_TOKEN n'est pas configuré.",
           });
@@ -1207,7 +1551,9 @@ app.get(
       await Client.connect(
         HF_SPACE,
         {
-          token: HF_TOKEN,
+          token:
+            HF_TOKEN,
+
           events: [
             "data",
             "status",
@@ -1217,8 +1563,10 @@ app.get(
 
       res.json({
         success: true,
+
         message:
           "Connexion Hugging Face réussie.",
+
         space:
           HF_SPACE,
       });
@@ -1227,6 +1575,7 @@ app.get(
         .status(500)
         .json({
           success: false,
+
           error:
             error.message ||
             "Connexion Hugging Face impossible.",
@@ -1242,16 +1591,19 @@ app.get(
 
 app.post(
   "/api/assets",
+
   upload.fields([
     {
       name: "image",
       maxCount: 1,
     },
+
     {
       name: "file",
       maxCount: 1,
     },
   ]),
+
   (req, res) => {
     try {
       const file =
@@ -1263,6 +1615,7 @@ app.post(
           .status(400)
           .json({
             success: false,
+
             message:
               "Aucun fichier image reçu.",
           });
@@ -1319,6 +1672,7 @@ app.post(
         .status(500)
         .json({
           success: false,
+
           message:
             error.message ||
             "Erreur serveur pendant l'upload.",
@@ -1334,6 +1688,7 @@ app.post(
 
 app.post(
   "/api/generate-video",
+
   async (req, res) => {
     const startedAt =
       Date.now();
@@ -1344,6 +1699,7 @@ app.post(
           .status(500)
           .json({
             success: false,
+
             error:
               "HF_TOKEN n'est pas configuré dans l'environnement.",
           });
@@ -1371,7 +1727,7 @@ app.post(
 
 
       // ------------------------------------------------------
-      // DURÉE DEMANDÉE PAR L'UTILISATEUR
+      // DURÉE DEMANDÉE
       // ------------------------------------------------------
 
       const requestedDuration =
@@ -1430,6 +1786,7 @@ app.post(
           .status(400)
           .json({
             success: false,
+
             error:
               "Aucune image de référence n'a été trouvée pour cette scène.",
           });
@@ -1564,11 +1921,9 @@ app.post(
       // GÉNÉRATION DES SEGMENTS
       // ------------------------------------------------------
 
-      const segmentPaths =
-        [];
+      const segmentPaths = [];
 
-      const segments =
-        [];
+      const segments = [];
 
       let currentImageBuffer =
         imageBuffer;
@@ -1576,8 +1931,10 @@ app.post(
 
       for (
         let index = 0;
+
         index <
         segmentDurations.length;
+
         index++
       ) {
         const segmentStarted =
@@ -1594,9 +1951,7 @@ app.post(
             index + 1
           }/${
             segmentDurations.length
-          } | ${
-            segmentDuration
-          }s ==========`
+          } | ${segmentDuration}s ==========`
         );
 
 
@@ -1608,9 +1963,9 @@ app.post(
         );
 
 
-        // Chaque segment possède
-        // son propre seed si
-        // randomizeSeed est actif.
+        // ----------------------------------------------------
+        // SEED
+        // ----------------------------------------------------
 
         const segmentSeed =
           finalRandomizeSeed
@@ -1622,9 +1977,9 @@ app.post(
               index;
 
 
-        // --------------------------------------------------
+        // ----------------------------------------------------
         // WAN
-        // --------------------------------------------------
+        // ----------------------------------------------------
 
         const remoteVideoUrl =
           await generateWanClip({
@@ -1658,9 +2013,20 @@ app.post(
           });
 
 
-        // --------------------------------------------------
+        if (
+          !remoteVideoUrl
+        ) {
+          throw new Error(
+            `Wan 2.2 n'a pas retourné de vidéo pour le segment ${
+              index + 1
+            }.`
+          );
+        }
+
+
+        // ----------------------------------------------------
         // TÉLÉCHARGER LE SEGMENT
-        // --------------------------------------------------
+        // ----------------------------------------------------
 
         const segmentFilename =
           `${Date.now()}-${Math.random()
@@ -1699,9 +2065,10 @@ app.post(
 
         const segmentElapsed =
           Math.round(
-            (Date.now() -
-              segmentStarted) /
-              1000
+            (
+              Date.now() -
+              segmentStarted
+            ) / 1000
           );
 
 
@@ -1726,9 +2093,9 @@ app.post(
         );
 
 
-        // --------------------------------------------------
+        // ----------------------------------------------------
         // CONTINUITÉ
-        // --------------------------------------------------
+        // ----------------------------------------------------
 
         if (
           index <
@@ -1848,9 +2215,10 @@ app.post(
 
       const elapsed =
         Math.round(
-          (Date.now() -
-            startedAt) /
-            1000
+          (
+            Date.now() -
+            startedAt
+          ) / 1000
         );
 
 
@@ -1901,9 +2269,10 @@ app.post(
     } catch (error) {
       const elapsed =
         Math.round(
-          (Date.now() -
-            startedAt) /
-            1000
+          (
+            Date.now() -
+            startedAt
+          ) / 1000
         );
 
 
