@@ -1,4 +1,11 @@
-
+Gmail, c'est encore mieux dans l'appli
+Une messagerie sécurisée, rapide et organisée
+Ouvrir
+Gestion erreur
+M
+MUSTAPHA HOME
+à moi
+il y a 0 minuteDétails
 import express from "express";
 import cors from "cors";
 import multer from "multer";
@@ -58,7 +65,6 @@ app.use(
   express.static(uploadsDir)
 );
 
-
 // ============================================================
 // MULTER / UPLOADS
 // ============================================================
@@ -91,7 +97,6 @@ const upload = multer({
   },
 });
 
-
 // ============================================================
 // HELPERS
 // ============================================================
@@ -109,7 +114,6 @@ function numberOr(value, fallback) {
 
   return Number.isFinite(n) ? n : fallback;
 }
-
 
 function booleanOr(value, fallback) {
   if (typeof value === "boolean") {
@@ -135,7 +139,6 @@ function booleanOr(value, fallback) {
   return fallback;
 }
 
-
 function formatEta(eta) {
   const n = Number(eta);
 
@@ -148,6 +151,85 @@ function formatEta(eta) {
     : `${Math.round(n / 60)}min`;
 }
 
+// ============================================================
+// DETECTION QUOTA ZEROGPU
+// ============================================================
+
+function parseQuotaError(message) {
+  if (!message) {
+    return {
+      isQuotaError: false,
+      requestedSeconds: null,
+      remainingSeconds: null,
+      retryAfter: null,
+      retryAfterSeconds: null,
+    };
+  }
+
+  const text = String(message);
+
+  const isQuotaError =
+    /exceeded your ZeroGPU quota/i.test(text) ||
+    /ZeroGPU quota/i.test(text) ||
+    /requested.*left/i.test(text) ||
+    /quota.*left/i.test(text);
+
+  if (!isQuotaError) {
+    return {
+      isQuotaError: false,
+      requestedSeconds: null,
+      remainingSeconds: null,
+      retryAfter: null,
+      retryAfterSeconds: null,
+    };
+  }
+
+  // Exemple :
+  // (154s requested vs. 51s left)
+  const quotaMatch = text.match(
+    /\(\s*(\d+(?:\.\d+)?)s\s+requested\s+vs\.\s*(\d+(?:\.\d+)?)s\s+left\s*\)/i
+  );
+
+  // Exemple :
+  // Try again in 12:26:15
+  const retryMatch = text.match(
+    /Try again in\s+(\d+):(\d{2}):(\d{2})/i
+  );
+
+  let retryAfterSeconds = null;
+
+  if (retryMatch) {
+    const hours = Number(retryMatch[1]);
+    const minutes = Number(retryMatch[2]);
+    const seconds = Number(retryMatch[3]);
+
+    retryAfterSeconds =
+      hours * 3600 +
+      minutes * 60 +
+      seconds;
+  }
+
+  return {
+    isQuotaError: true,
+
+    requestedSeconds: quotaMatch
+      ? Number(quotaMatch[1])
+      : null,
+
+    remainingSeconds: quotaMatch
+      ? Number(quotaMatch[2])
+      : null,
+
+    retryAfter: retryMatch
+      ? retryMatch[0].replace(
+          /^Try again in\s+/i,
+          ""
+        )
+      : null,
+
+    retryAfterSeconds,
+  };
+}
 
 // ============================================================
 // EXTRACTION VIDEO GRADIO / WAN
@@ -169,13 +251,10 @@ function extractVideoValue(value) {
       return null;
     }
 
-    // URL HTTP/HTTPS
     if (/^https?:\/\//i.test(trimmed)) {
       return trimmed;
     }
 
-    // Certaines réponses peuvent contenir
-    // directement un chemin vidéo.
     if (
       /\.(mp4|webm|mov|m4v)(\?.*)?$/i.test(
         trimmed
@@ -186,7 +265,6 @@ function extractVideoValue(value) {
 
     return null;
   }
-
 
   // ----------------------------------------------------------
   // Tableau
@@ -204,7 +282,6 @@ function extractVideoValue(value) {
     return null;
   }
 
-
   // ----------------------------------------------------------
   // Objet
   // ----------------------------------------------------------
@@ -213,7 +290,6 @@ function extractVideoValue(value) {
     typeof value === "object" &&
     value !== null
   ) {
-    // Formats fréquents retournés par Gradio
     const candidates = [
       value.url,
       value.video,
@@ -231,8 +307,6 @@ function extractVideoValue(value) {
       }
     }
 
-
-    // Recherche récursive dans l'objet
     for (const key of Object.keys(value)) {
       const result =
         extractVideoValue(value[key]);
@@ -246,7 +320,6 @@ function extractVideoValue(value) {
   return null;
 }
 
-
 // ============================================================
 // IMAGE HANDLING
 // ============================================================
@@ -259,27 +332,20 @@ function normalizeImageUrl(value) {
     return null;
   }
 
-  if (
-    /^https?:\/\//i.test(value)
-  ) {
+  if (/^https?:\/\//i.test(value)) {
     return value;
   }
 
-  if (
-    value.startsWith("/uploads/")
-  ) {
+  if (value.startsWith("/uploads/")) {
     return value;
   }
 
-  if (
-    value.startsWith("uploads/")
-  ) {
+  if (value.startsWith("uploads/")) {
     return `/${value}`;
   }
 
   return value;
 }
-
 
 function findFirstImage(scene) {
   if (
@@ -301,7 +367,6 @@ function findFirstImage(scene) {
     );
   }
 
-
   const getUrl = (image) => {
     if (typeof image === "string") {
       return normalizeImageUrl(image);
@@ -316,10 +381,9 @@ function findFirstImage(scene) {
 
     return normalizeImageUrl(
       image.storageUrl ||
-        image.url
+      image.url
     );
   };
-
 
   // ----------------------------------------------------------
   // Personnages + lieux
@@ -338,8 +402,6 @@ function findFirstImage(scene) {
         continue;
       }
 
-
-      // Plusieurs images
       for (
         const image of
         item.imageReferences || []
@@ -351,12 +413,10 @@ function findFirstImage(scene) {
         }
       }
 
-
-      // Image directe
       const direct =
         normalizeImageUrl(
           item.imageUrl ||
-            item.image
+          item.image
         );
 
       if (direct) {
@@ -364,7 +424,6 @@ function findFirstImage(scene) {
       }
     }
   }
-
 
   // ----------------------------------------------------------
   // Images de référence de scène
@@ -380,7 +439,6 @@ function findFirstImage(scene) {
       return url;
     }
   }
-
 
   // ----------------------------------------------------------
   // Images du style visuel
@@ -400,7 +458,6 @@ function findFirstImage(scene) {
   return null;
 }
 
-
 function resolveLocalUploadPath(imageUrl) {
   const relative =
     imageUrl.replace(/^\/+/, "");
@@ -415,11 +472,8 @@ function resolveLocalUploadPath(imageUrl) {
     `${path.resolve(uploadsDir)}${path.sep}`;
 
   if (
-    resolved !==
-      path.resolve(uploadsDir) &&
-    !resolved.startsWith(
-      uploadsRoot
-    )
+    resolved !== path.resolve(uploadsDir) &&
+    !resolved.startsWith(uploadsRoot)
   ) {
     throw new Error(
       "Le chemin de l'image n'est pas autorisé."
@@ -428,7 +482,6 @@ function resolveLocalUploadPath(imageUrl) {
 
   return resolved;
 }
-
 
 // ============================================================
 // VIDEO PROMPT
@@ -447,7 +500,6 @@ function buildVideoPrompt(
 
   const parts = [];
 
-
   // ----------------------------------------------------------
   // Description
   // ----------------------------------------------------------
@@ -457,7 +509,6 @@ function buildVideoPrompt(
       `Scene description: ${scene.description}`
     );
   }
-
 
   // ----------------------------------------------------------
   // Action
@@ -472,15 +523,12 @@ function buildVideoPrompt(
     );
   }
 
-
   // ----------------------------------------------------------
   // Personnages
   // ----------------------------------------------------------
 
   if (
-    Array.isArray(
-      scene.characters
-    )
+    Array.isArray(scene.characters)
   ) {
     const characters =
       scene.characters
@@ -503,15 +551,12 @@ function buildVideoPrompt(
     }
   }
 
-
   // ----------------------------------------------------------
   // Lieux
   // ----------------------------------------------------------
 
   if (
-    Array.isArray(
-      scene.locations
-    )
+    Array.isArray(scene.locations)
   ) {
     const locations =
       scene.locations
@@ -533,15 +578,12 @@ function buildVideoPrompt(
     }
   }
 
-
   // ----------------------------------------------------------
   // Mouvements
   // ----------------------------------------------------------
 
   if (
-    Array.isArray(
-      scene.movements
-    )
+    Array.isArray(scene.movements)
   ) {
     const movements =
       scene.movements
@@ -569,7 +611,6 @@ function buildVideoPrompt(
     }
   }
 
-
   // ----------------------------------------------------------
   // Dialogue
   // ----------------------------------------------------------
@@ -579,7 +620,6 @@ function buildVideoPrompt(
       `Dialogue context: ${scene.dialogue}`
     );
   }
-
 
   // ----------------------------------------------------------
   // Style
@@ -597,7 +637,6 @@ function buildVideoPrompt(
     );
   }
 
-
   // ----------------------------------------------------------
   // Consignes cinéma
   // ----------------------------------------------------------
@@ -608,7 +647,6 @@ function buildVideoPrompt(
 
   return parts.join("\n\n");
 }
-
 
 // ============================================================
 // SEGMENTATION
@@ -652,7 +690,6 @@ function splitDurationIntoSegments(
   return segments;
 }
 
-
 // ============================================================
 // PHRASES
 // ============================================================
@@ -673,7 +710,6 @@ function splitTextIntoSentences(text) {
     .map((x) => x.trim())
     .filter(Boolean);
 }
-
 
 // ============================================================
 // MOUVEMENTS
@@ -705,7 +741,6 @@ function getMovementDescriptions(scene) {
     })
     .filter(Boolean);
 }
-
 
 // ============================================================
 // PROMPTS AUTOMATIQUES PAR SEGMENT
@@ -781,7 +816,6 @@ function buildAutomaticSegmentPrompts(
   );
 }
 
-
 // ============================================================
 // FFMPEG
 // ============================================================
@@ -845,7 +879,6 @@ function runFfmpeg(args) {
   );
 }
 
-
 // ============================================================
 // EXTRACTION DERNIÈRE FRAME
 // ============================================================
@@ -890,7 +923,6 @@ async function extractLastFrame(
   };
 }
 
-
 // ============================================================
 // CONCATÉNATION DES SEGMENTS
 // ============================================================
@@ -924,7 +956,6 @@ async function concatenateVideos(
       finalFilename
     );
 
-
   const lines =
     videoPaths
       .map(
@@ -942,7 +973,6 @@ async function concatenateVideos(
     lines,
     "utf8"
   );
-
 
   try {
     // --------------------------------------------------------
@@ -1002,7 +1032,6 @@ async function concatenateVideos(
     } catch {}
   }
 
-
   return {
     path: finalPath,
 
@@ -1012,7 +1041,6 @@ async function concatenateVideos(
       )}/uploads/${finalFilename}`,
   };
 }
-
 
 // ============================================================
 // WAN : GÉNÉRER UN SEGMENT
@@ -1057,7 +1085,6 @@ async function generateWanClip({
   return result.video;
 }
 
-
 // ============================================================
 // WAN : ATTENDRE LE JOB
 // ============================================================
@@ -1071,15 +1098,10 @@ async function waitForWanJob(
   return new Promise(
     (resolve, reject) => {
       let settled = false;
-
       let finalVideo = null;
-
       let lastStatus = null;
-
       let dataReceived = false;
-
       let graceTimer = null;
-
 
       const finish = (
         fn,
@@ -1102,7 +1124,6 @@ async function waitForWanJob(
         fn(value);
       };
 
-
       const timeoutTimer =
         setTimeout(
           () => {
@@ -1123,12 +1144,10 @@ async function waitForWanJob(
           WAN_TIMEOUT_MS
         );
 
-
       const iterator =
         job?.[
           Symbol.asyncIterator
         ]?.() || job;
-
 
       (async () => {
         try {
@@ -1146,7 +1165,6 @@ async function waitForWanJob(
             if (!message) {
               continue;
             }
-
 
             // ------------------------------------------------
             // STATUS
@@ -1185,24 +1203,32 @@ async function waitForWanJob(
                 )} | elapsed=${elapsed}s`
               );
 
-
+              // ------------------------------------------------
               // Erreur Wan
+              // ------------------------------------------------
+
               if (
                 stage ===
                 "error"
               ) {
+                const errorMessage =
+                  message.message ||
+                  message.error ||
+                  message.code ||
+                  "Erreur signalée par Wan 2.2.";
+
                 return finish(
                   reject,
                   new Error(
-                    message.message ||
-                      message.code ||
-                      "Erreur signalée par Wan 2.2."
+                    errorMessage
                   )
                 );
               }
 
-
+              // ------------------------------------------------
               // Job terminé
+              // ------------------------------------------------
+
               if (
                 stage ===
                 "complete"
@@ -1221,7 +1247,6 @@ async function waitForWanJob(
                     }
                   );
                 }
-
 
                 // Laisser 15 secondes
                 // pour recevoir le data final.
@@ -1258,7 +1283,6 @@ async function waitForWanJob(
               }
             }
 
-
             // ------------------------------------------------
             // DATA
             // ------------------------------------------------
@@ -1274,16 +1298,10 @@ async function waitForWanJob(
                 "[WAN DATA] Résultat reçu."
               );
 
-
-              // IMPORTANT :
-              // Cette fonction corrige l'erreur
-              // "extractVideoValue is not defined".
-
               const video =
                 extractVideoValue(
                   message.data
                 );
-
 
               if (video) {
                 finalVideo =
@@ -1304,11 +1322,6 @@ async function waitForWanJob(
                   }
                 );
               }
-
-
-              // Diagnostic utile si
-              // la structure retournée
-              // par Gradio change.
 
               let rawData = "";
 
@@ -1338,7 +1351,6 @@ async function waitForWanJob(
             }
           }
 
-
           // --------------------------------------------------
           // FIN ITERATEUR
           // --------------------------------------------------
@@ -1358,7 +1370,6 @@ async function waitForWanJob(
             );
           }
 
-
           finish(
             reject,
             new Error(
@@ -1375,7 +1386,6 @@ async function waitForWanJob(
     }
   );
 }
-
 
 // ============================================================
 // DOWNLOAD VIDEO WAN
@@ -1432,7 +1442,6 @@ async function downloadRemoteFile(
   );
 }
 
-
 // ============================================================
 // SAUVEGARDE VIDÉO LOCALE
 // ============================================================
@@ -1475,7 +1484,6 @@ async function saveVideoLocally(
   )}/uploads/${filename}`;
 }
 
-
 // ============================================================
 // ROOT
 // ============================================================
@@ -1505,7 +1513,6 @@ app.get(
   }
 );
 
-
 // ============================================================
 // HEALTH
 // ============================================================
@@ -1527,7 +1534,6 @@ app.get(
     });
   }
 );
-
 
 // ============================================================
 // TEST HUGGING FACE
@@ -1584,14 +1590,12 @@ app.get(
   }
 );
 
-
 // ============================================================
 // UPLOAD ASSETS
 // ============================================================
 
 app.post(
   "/api/assets",
-
   upload.fields([
     {
       name: "image",
@@ -1603,7 +1607,6 @@ app.post(
       maxCount: 1,
     },
   ]),
-
   (req, res) => {
     try {
       const file =
@@ -1621,14 +1624,12 @@ app.post(
           });
       }
 
-
       const publicUrl =
         `${req.protocol}://${req.get(
           "host"
         )}/uploads/${encodeURIComponent(
           file.filename
         )}`;
-
 
       return res.json({
         success: true,
@@ -1681,14 +1682,12 @@ app.post(
   }
 );
 
-
 // ============================================================
 // GENERATION VIDÉO
 // ============================================================
 
 app.post(
   "/api/generate-video",
-
   async (req, res) => {
     const startedAt =
       Date.now();
@@ -1702,9 +1701,11 @@ app.post(
 
             error:
               "HF_TOKEN n'est pas configuré dans l'environnement.",
+
+            code:
+              "HF_TOKEN_MISSING",
           });
       }
-
 
       const {
         scene,
@@ -1719,12 +1720,10 @@ app.post(
         randomizeSeed,
       } = req.body || {};
 
-
       const data =
         sceneData ||
         scene ||
         {};
-
 
       // ------------------------------------------------------
       // DURÉE DEMANDÉE
@@ -1740,7 +1739,6 @@ app.post(
           1
         );
 
-
       // ------------------------------------------------------
       // DÉCOUPAGE AUTOMATIQUE
       // ------------------------------------------------------
@@ -1749,7 +1747,6 @@ app.post(
         splitDurationIntoSegments(
           requestedDuration
         );
-
 
       console.log(
         "=========================================="
@@ -1769,7 +1766,6 @@ app.post(
         "=========================================="
       );
 
-
       // ------------------------------------------------------
       // IMAGE INITIALE
       // ------------------------------------------------------
@@ -1780,7 +1776,6 @@ app.post(
             findFirstImage(data)
         );
 
-
       if (!finalImageUrl) {
         return res
           .status(400)
@@ -1789,12 +1784,13 @@ app.post(
 
             error:
               "Aucune image de référence n'a été trouvée pour cette scène.",
+
+            code:
+              "REFERENCE_IMAGE_MISSING",
           });
       }
 
-
       let imageBuffer;
-
 
       if (
         /^https?:\/\//i.test(
@@ -1826,7 +1822,6 @@ app.post(
             localPath
           );
       }
-
 
       // ------------------------------------------------------
       // PARAMÈTRES WAN
@@ -1862,7 +1857,6 @@ app.post(
           false
         );
 
-
       // ------------------------------------------------------
       // PROMPT GLOBAL
       // ------------------------------------------------------
@@ -1877,7 +1871,6 @@ app.post(
           }
         );
 
-
       // ------------------------------------------------------
       // PROMPTS SEGMENTS
       // ------------------------------------------------------
@@ -1888,7 +1881,6 @@ app.post(
           basePrompt,
           segmentDurations
         );
-
 
       // ------------------------------------------------------
       // CONNEXION HUGGING FACE
@@ -1916,7 +1908,6 @@ app.post(
         "Connexion Hugging Face réussie."
       );
 
-
       // ------------------------------------------------------
       // GÉNÉRATION DES SEGMENTS
       // ------------------------------------------------------
@@ -1928,13 +1919,10 @@ app.post(
       let currentImageBuffer =
         imageBuffer;
 
-
       for (
         let index = 0;
-
         index <
         segmentDurations.length;
-
         index++
       ) {
         const segmentStarted =
@@ -1945,7 +1933,6 @@ app.post(
             index
           ];
 
-
         console.log(
           `========== SEGMENT ${
             index + 1
@@ -1954,14 +1941,12 @@ app.post(
           } | ${segmentDuration}s ==========`
         );
 
-
         console.log(
           "Prompt segment:",
           segmentPrompts[
             index
           ]
         );
-
 
         // ----------------------------------------------------
         // SEED
@@ -1975,7 +1960,6 @@ app.post(
               )
             : finalSeed +
               index;
-
 
         // ----------------------------------------------------
         // WAN
@@ -2012,7 +1996,6 @@ app.post(
               finalRandomizeSeed,
           });
 
-
         if (
           !remoteVideoUrl
         ) {
@@ -2022,7 +2005,6 @@ app.post(
             }.`
           );
         }
-
 
         // ----------------------------------------------------
         // TÉLÉCHARGER LE SEGMENT
@@ -2038,30 +2020,25 @@ app.post(
               index + 1
             }.mp4`;
 
-
         const segmentPath =
           path.join(
             uploadsDir,
             segmentFilename
           );
 
-
         const segmentBuffer =
           await downloadRemoteFile(
             remoteVideoUrl
           );
-
 
         fs.writeFileSync(
           segmentPath,
           segmentBuffer
         );
 
-
         segmentPaths.push(
           segmentPath
         );
-
 
         const segmentElapsed =
           Math.round(
@@ -2070,7 +2047,6 @@ app.post(
               segmentStarted
             ) / 1000
           );
-
 
         segments.push({
           index:
@@ -2083,15 +2059,11 @@ app.post(
             segmentElapsed,
         });
 
-
         console.log(
           `Segment ${
             index + 1
-          } enregistré: ${
-            segmentFilename
-          }`
+          } enregistré: ${segmentFilename}`
         );
-
 
         // ----------------------------------------------------
         // CONTINUITÉ
@@ -2108,23 +2080,19 @@ app.post(
             }...`
           );
 
-
           const lastFrame =
             await extractLastFrame(
               segmentPath
             );
 
-
           currentImageBuffer =
             lastFrame.buffer;
-
 
           try {
             fs.unlinkSync(
               lastFrame.path
             );
           } catch {}
-
 
           console.log(
             `Dernière frame du segment ${
@@ -2136,13 +2104,11 @@ app.post(
         }
       }
 
-
       // ------------------------------------------------------
       // ASSEMBLAGE FINAL
       // ------------------------------------------------------
 
       let finalVideo;
-
 
       if (
         segmentPaths.length ===
@@ -2156,19 +2122,16 @@ app.post(
               8
             )}-scene.mp4`;
 
-
         const destination =
           path.join(
             uploadsDir,
             filename
           );
 
-
         fs.copyFileSync(
           segmentPaths[0],
           destination
         );
-
 
         finalVideo = {
           path:
@@ -2184,14 +2147,12 @@ app.post(
           "Assemblage des segments avec FFmpeg..."
         );
 
-
         finalVideo =
           await concatenateVideos(
             segmentPaths,
             req
           );
       }
-
 
       // ------------------------------------------------------
       // SUPPRIMER LES SEGMENTS TEMPORAIRES
@@ -2208,7 +2169,6 @@ app.post(
         } catch {}
       }
 
-
       // ------------------------------------------------------
       // RÉSULTAT
       // ------------------------------------------------------
@@ -2221,17 +2181,14 @@ app.post(
           ) / 1000
         );
 
-
       console.log(
         `SCÈNE TERMINÉE: ${requestedDuration}s en ${elapsed}s`
       );
-
 
       console.log(
         "Vidéo finale:",
         finalVideo.url
       );
-
 
       return res.json({
         success:
@@ -2275,12 +2232,95 @@ app.post(
           ) / 1000
         );
 
+      const message =
+        error?.message ||
+        String(error);
 
       console.error(
         "Erreur génération scène Wan 2.2:",
-        error
+        message
       );
 
+      // ======================================================
+      // QUOTA HUGGING FACE ZEROGPU
+      // ======================================================
+
+      const quota =
+        parseQuotaError(
+          message
+        );
+
+      if (
+        quota.isQuotaError
+      ) {
+        console.warn(
+          "QUOTA ZEROGPU INSUFFISANT."
+        );
+
+        console.warn(
+          `Demandé: ${quota.requestedSeconds ?? "?"}s`
+        );
+
+        console.warn(
+          `Restant: ${quota.remainingSeconds ?? "?"}s`
+        );
+
+        console.warn(
+          `Réessayer dans: ${quota.retryAfter ?? "inconnu"}`
+        );
+
+        // HTTP Retry-After
+        if (
+          Number.isFinite(
+            quota.retryAfterSeconds
+          )
+        ) {
+          res.set(
+            "Retry-After",
+            String(
+              quota.retryAfterSeconds
+            )
+          );
+        }
+
+        return res
+          .status(429)
+          .json({
+            success:
+              false,
+
+            error:
+              "Le quota ZeroGPU Hugging Face est temporairement insuffisant.",
+
+            code:
+              "ZEROGPU_QUOTA_EXCEEDED",
+
+            message:
+              "La génération vidéo ne peut pas être lancée pour le moment car le quota GPU disponible est insuffisant.",
+
+            requestedSeconds:
+              quota.requestedSeconds,
+
+            remainingSeconds:
+              quota.remainingSeconds,
+
+            retryAfter:
+              quota.retryAfter,
+
+            retryAfterSeconds:
+              quota.retryAfterSeconds,
+
+            details:
+              message,
+
+            elapsedSeconds:
+              elapsed,
+          });
+      }
+
+      // ======================================================
+      // AUTRES ERREURS
+      // ======================================================
 
       return res
         .status(500)
@@ -2289,8 +2329,13 @@ app.post(
             false,
 
           error:
-            error?.message ||
             "Erreur pendant la génération vidéo Wan 2.2.",
+
+          code:
+            "VIDEO_GENERATION_ERROR",
+
+          details:
+            message,
 
           elapsedSeconds:
             elapsed,
@@ -2298,7 +2343,6 @@ app.post(
     }
   }
 );
-
 
 // ============================================================
 // COMPATIBILITÉ
@@ -2311,7 +2355,6 @@ app.post(
       prompt,
       scene,
     } = req.body || {};
-
 
     res.json({
       success:
@@ -2328,7 +2371,6 @@ app.post(
     });
   }
 );
-
 
 // ============================================================
 // ERREURS
@@ -2356,12 +2398,10 @@ app.use(
         });
     }
 
-
     console.error(
       "ERREUR SERVEUR:",
       error
     );
-
 
     res
       .status(500)
@@ -2375,7 +2415,6 @@ app.use(
       });
   }
 );
-
 
 // ============================================================
 // START
