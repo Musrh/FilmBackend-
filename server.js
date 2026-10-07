@@ -1,11 +1,4 @@
-Gmail, c'est encore mieux dans l'appli
-Une messagerie sécurisée, rapide et organisée
-Ouvrir
-Segmentation
-M
-MUSTAPHA HOME
-à moi
-il y a 5 minutesDétails
+
 import express from "express";
 import cors from "cors";
 import multer from "multer";
