@@ -1,4 +1,5 @@
 
+
 import express from "express";
 import cors from "cors";
 import multer from "multer";
@@ -645,39 +646,34 @@ function buildVideoPrompt(
 // SEGMENTATION
 // ============================================================
 
-function splitDurationIntoSegments(
-  totalDuration
-) {
-  let remaining = Math.max(
-    numberOr(
-      totalDuration,
-      1
-    ),
+function splitDurationIntoSegments(totalDuration) {
+  const requested = Math.max(
+    numberOr(totalDuration, 1),
     1
   );
 
+  // Test temporaire : 5 secondes = 2 s + 3 s.
+  if (Math.abs(requested - 5) < 0.01) {
+    return [2, 3];
+  }
+
+  // Comportement normal pour toutes les autres durées.
+  let remaining = requested;
   const segments = [];
 
   while (remaining > 0) {
-    const duration =
-      Math.min(
-        remaining,
-        WAN_MAX_SEGMENT_DURATION
-      );
-
-    segments.push(
-      Number(
-        duration.toFixed(2)
-      )
+    const segmentDuration = Math.min(
+      remaining,
+      WAN_MAX_SEGMENT_DURATION
     );
 
-    remaining =
-      Number(
-        (
-          remaining -
-          duration
-        ).toFixed(2)
-      );
+    segments.push(
+      Number(segmentDuration.toFixed(2))
+    );
+
+    remaining = Number(
+      (remaining - segmentDuration).toFixed(2)
+    );
   }
 
   return segments;
@@ -2468,3 +2464,4 @@ app.listen(
     );
   }
 );
+
